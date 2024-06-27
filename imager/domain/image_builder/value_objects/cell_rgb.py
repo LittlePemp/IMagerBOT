@@ -1,5 +1,5 @@
 from .color_definition import ColorDefinition
-from src.shared_kernel.result import Result
+from imager.shared_kernel.result import Result
 
 
 class CellRgb:

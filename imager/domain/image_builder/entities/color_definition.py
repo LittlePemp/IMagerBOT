@@ -1,4 +1,4 @@
-from src.shared_kernel.result import Result
+from imager.shared_kernel.result import Result
 
 
 class ColorDefinition:
