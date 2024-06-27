@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo
+    container_name: mongodb
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+
+  imager:
+    build:
+      context: .
+      dockerfile: imager/Dockerfile
+    command: python manage.py runserver
+    volumes:
+      - ../imager:/app
+    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - DATABASE_NAME=${DATABASE_NAME}
+      - IMAGE_GROUPS_RELATIVE_PATH=${IMAGE_GROUPS_RELATIVE_PATH}
+      - UPLOADED_IMAGES_PATH=${UPLOADED_IMAGES_PATH}
+      - GENERATED_IMAGES_PATH=${GENERATED_IMAGES_PATH}
+    depends_on:
+      - mongodb
+
+volumes:
+  mongo_data:
