@@ -1,7 +1,8 @@
 import cv2
 from cv2.typing import MatLike
-from imager.domain.image_builder.aggregates.cell import Cell
-from imager.shared_kernel.result import Result
+
+from ....shared_kernel.result import Result
+from ..aggregates.cell import Cell
 
 
 class CellObject:
