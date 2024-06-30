@@ -1,6 +1,7 @@
 from eventsourcing.domain import Aggregate, event
-from imager.domain.image_builder.value_objects.cell_rgb import CellRgb
-from imager.shared_kernel.result import Result
+
+from ....shared_kernel.result import Result
+from ..value_objects.cell_rgb import CellRgb
 
 
 class Cell(Aggregate):
