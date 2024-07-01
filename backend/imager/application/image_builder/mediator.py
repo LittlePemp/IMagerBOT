@@ -1,3 +1,6 @@
+from imager.application.image_builder.commands.load_missing_groups import (
+    LoadMissingGroupsCommand, LoadMissingGroupsCommandHandler)
+
 from .commands.check_images import (CheckImagesCommand,
                                     CheckImagesCommandHandler)
 from .commands.load_images import LoadImagesCommand, LoadImagesCommandHandler
@@ -28,6 +31,7 @@ class Mediator:
 mediator = Mediator()
 
 mediator.register(LoadImagesCommand, LoadImagesCommandHandler())
+mediator.register(LoadMissingGroupsCommand, LoadMissingGroupsCommandHandler())
 mediator.register(VerifyImagesCommand, VerifyImagesCommandHandler())
 mediator.register(ValidateImagesDataCommand, ValidateImagesDataCommandHandler())
 mediator.register(CheckImagesCommand, CheckImagesCommandHandler())

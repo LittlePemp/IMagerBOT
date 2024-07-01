@@ -28,9 +28,9 @@ class MongoUnitOfWork(BaseMongoUnitOfWork):
             database=settings.database_name,
         )
         super().__init__([cell_repository, cell_object_repository])
-        self.cell_repository = CellRepository(cell_repository)
-        self.cell_object_repository = CellObjectRepository(cell_object_repository)
         self.file_repository = FileRepository()
+        self.cell_repository = CellRepository(cell_repository, self.file_repository)
+        self.cell_object_repository = CellObjectRepository(cell_object_repository)
         self.settings = settings
 
 

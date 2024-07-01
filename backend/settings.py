@@ -10,13 +10,13 @@ class Settings:
         self.database_name = os.getenv('DATABASE_NAME')
         self.image_groups_relative_path = os.getenv(
             'IMAGE_GROUPS_RELATIVE_PATH',
-            'imager/files/groups')
+            'files/groups')
         self.uploaded_images_path = os.getenv(
             'UPLOADED_IMAGES_PATH',
-            'imager/files/uploaded')
+            'files/uploaded')
         self.generated_images_path = os.getenv(
             'GENERATED_IMAGES_PATH',
-            'imager/files/generated')
+            'files/generated')
 
         self.create_directories()
 

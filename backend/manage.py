@@ -1,4 +1,8 @@
-import sys
 import os
 
-sys.path.append(os.path.dirname(__file__))
+os.environ['PY_ASSIMILATOR_MESSAGE'] = 'False'
+
+from imager.presentation.cli.cli import cli  # noqa
+
+if __name__ == '__main__':
+    cli()
