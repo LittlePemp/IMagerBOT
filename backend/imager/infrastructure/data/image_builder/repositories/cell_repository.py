@@ -6,24 +6,35 @@ from imager.infrastructure.data.image_builder.repositories.file_repository impor
 from imager.domain.image_builder.entities.cell_object import CellObject
 from imager.domain.image_builder.repository_interface import IRepository
 from imager.shared_kernel.loggers import db_logger
-from scipy.spatial import KDTree
 from assimilator.mongo.database import MongoRepository
 from imager.domain.image_builder.value_objects.cell_rgb import CellRgb
 from imager.infrastructure.data.image_builder.models.cell_model import CellModel
 from imager.domain.image_builder.services.kdtree_service import KDTreeService
 
+
 class CellRepository(IRepository):
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if not cls._instance:
+            cls._instance = super(CellRepository, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, mongo_repository: MongoRepository, file_repository: FileRepository):
-        self.mongo_repository = mongo_repository
-        self.file_repository = file_repository
-        self._data = defaultdict(dict)
-        self._trees = {}
+        if not hasattr(self, '_initialized'):
+            self.mongo_repository = mongo_repository
+            self.file_repository = file_repository
+            self._data = defaultdict(dict)
+            self._trees = {}
+            self._initialized = False
 
     def initialize(self):
-        self.load_data_from_mongo()
-        self.load_images()
-        self.__build_trees()
-        db_logger.info('CellRepository initialized')
+        if not self._initialized:
+            self.load_data_from_mongo()
+            self.load_images()
+            self.__build_trees()
+            db_logger.info('CellRepository initialized')
+            self._initialized = True
 
     def load_data_from_mongo(self):
         for group in self.get_all_groups():
