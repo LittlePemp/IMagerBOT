@@ -3,6 +3,7 @@ from imager.shared_kernel.result import Result
 from imager.domain.image_builder.value_objects.image_build_params import (
     ImageInsertionFormat, AlphaChannel, NoiseLevel, CellSize, ResultSize, ImageGroup
 )
+from imager.application.image_builder.services.imager_builder import ImagerBuilder
 
 
 class GenerateImageCommand:
@@ -44,7 +45,18 @@ class GenerateImageCommandHandler:
             if not image_group_result.is_success:
                 return image_group_result
 
-            # TODO: generate image with params
-            return Result.Success('Image generated successfully')
+            builder = ImagerBuilder(
+                file_repository=uow.file_repository,
+                cell_repository=uow.cell_repository,
+                result_size=command.result_size,
+                cell_size=command.cell_size,
+                alpha=command.alpha_channel / 100,
+                noise_degree=command.noise_level
+            )
+            final_image_result = builder.make_image(command.image_path, command.group_name)
+            if not final_image_result.is_success:
+                return final_image_result
+
+            return final_image_result
         except Exception as e:
             return Result.Error(f'An error occurred: {e}')
