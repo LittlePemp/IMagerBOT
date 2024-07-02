@@ -1,35 +1,38 @@
 import os
 from imager.infrastructure.data.image_builder.unit_of_work import get_uow
 from imager.shared_kernel.result import Result
+from settings import settings
 
 
 class ValidateImagesDataCommand:
-    def __init__(self, directory: str):
-        self.directory = directory
+    def __init__(self, group_name):
+        self.group_name = group_name
 
 
 class ValidateImagesDataCommandHandler:
-    def __init__(self):
-        self.uow = get_uow()
-
     def handle(self, command: ValidateImagesDataCommand) -> Result:
-        file_repository = self.uow.file_repository
-        directory = command.directory
+        uow = get_uow()
+        try:
+            file_repository = uow.file_repository
+            cell_repository = uow.cell_repository
 
-        invalid_data = []
-        for group_name in os.listdir(directory):
-            group_path = os.path.join(directory, group_name)
-            if os.path.isdir(group_path):
-                for image_name in os.listdir(group_path):
-                    image_path = os.path.join(group_path, image_name)
-                    image_data = file_repository.read_image_file(image_path)
-                    if not self.validate_image_data(image_data):
-                        invalid_data.append(image_path)
+            directory = os.path.join(
+                settings.image_groups_relative_path,
+                command.group_name
+            )
 
-        if invalid_data:
-            return Result.Error(f'Invalid image data: {invalid_data}')
-        return Result.Success('All image data is valid')
+            image_files = set(file_repository.list_image_files(directory))
 
-    def validate_image_data(self, image_data) -> bool:
-        # TODO: validate for all image params
-        return True
+            db_image_files = set(cell.relative_file_path for cell in cell_repository.mongo_repository.filter())
+
+            missing_in_db = image_files - db_image_files
+            if missing_in_db:
+                return Result.Error(f'Images missing in database: {missing_in_db}')
+
+            missing_on_disk = db_image_files - image_files
+            if missing_on_disk:
+                return Result.Error(f'Images missing on disk: {missing_on_disk}')
+
+            return Result.Success(f'All images in {command.group_name} are validated successfully')
+        except Exception as e:
+            return Result.Error(f"An error occurred: {e}")
