@@ -1,21 +1,27 @@
 import os
+
 from imager.infrastructure.data.image_builder.unit_of_work import get_uow
 from imager.shared_kernel.result import Result
+from settings import settings
 
 
 class VerifyImagesCommand:
-    def __init__(self, directory: str):
-        self.directory = directory
+    def __init__(self, group_name: str):
+        self.group_name = group_name
 
 
 class VerifyImagesCommandHandler:
+    '''
+    TODO: проверка параметров изображения
+    '''
     def __init__(self):
         self.uow = get_uow()
 
     def handle(self, command: VerifyImagesCommand) -> Result:
         file_repository = self.uow.file_repository
-        directory = command.directory
+        group_name = command.group_name
 
+        directory = os.path.join(settings.image_groups_relative_path, group_name)
         missing_images = []
         for group_name in os.listdir(directory):
             group_path = os.path.join(directory, group_name)

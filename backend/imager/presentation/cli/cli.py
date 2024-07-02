@@ -42,9 +42,9 @@ def load(directory):
 
 
 @cli.command()
-@click.argument('directory')
-def verify(directory):
-    command = VerifyImagesCommand(directory)
+@click.argument('group_name')
+def verify(group_name):
+    command = VerifyImagesCommand(group_name)
     result = mediator.send(command)
     if result.is_success:
         click.echo(result.value)
@@ -64,9 +64,9 @@ def validate(directory):
 
 
 @cli.command()
-@click.argument('directory')
-def check(directory):
-    command = CheckImagesCommand(directory)
+@click.argument('group_images')
+def check(group_images):
+    command = CheckImagesCommand(group_images)
     result = mediator.send(command)
     if result.is_success:
         click.echo(result.value)
