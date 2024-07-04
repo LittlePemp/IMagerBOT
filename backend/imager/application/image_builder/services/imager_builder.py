@@ -16,6 +16,7 @@ class ImagerBuilder:
         self,
         file_repository: FileRepository,
         cell_repository: CellRepository,
+        insertion_format: str,
         result_size: int,
         cell_size: int,
         alpha: float,
@@ -23,6 +24,7 @@ class ImagerBuilder:
     ):
         self.file_repository = file_repository
         self.cell_repository = cell_repository
+        self.insertion_format = insertion_format
         self.result_size = result_size
         self.cell_size = cell_size
         self.alpha = alpha
@@ -61,7 +63,7 @@ class ImagerBuilder:
 
     def create_result_image(self, small_image: np.ndarray, small_width: int,
                             small_height: int, group: str) -> np.ndarray:
-        tiles = ImageService.split_image(small_image, 1, 1)
+        tiles = ImageService.split_image(small_image, 1, 1)  # TODO:if need sharding
         result_image = ImageService.create_template(
             small_width * self.cell_size, small_height * self.cell_size)
         for i, tile in enumerate(tiles):
@@ -93,10 +95,14 @@ class ImagerBuilder:
                 if cell_image is None:
                     application_logger.error(f'Cell image is None for pixel {noised_rgb} in group {group}')
                     continue
-                cell_image_resized = ImageService.resize_image(cell_image, self.cell_size, self.cell_size)
+
+                if self.insertion_format == 'crop':
+                    cell_image = ImageService.crop_square_image(cell_image)
+                cell_image = ImageService.resize_image(cell_image, self.cell_size, self.cell_size)
+
                 y_big = y * self.cell_size
                 x_big = x * self.cell_size
-                result_tile[y_big: y_big + self.cell_size, x_big: x_big + self.cell_size] = cell_image_resized
+                result_tile[y_big: y_big + self.cell_size, x_big: x_big + self.cell_size] = cell_image
         return result_tile
 
     def save_image(self, final_image: np.ndarray) -> str:

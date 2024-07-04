@@ -44,3 +44,24 @@ class TestImageService(unittest.TestCase):
     def test_convert_rgba_to_rgb(self):
         rgb_image = ImageService.convert_rgba_to_rgb(self.image_rgba)
         self.assertEqual(rgb_image.shape, (100, 100, 3))
+
+    def test_crop_square_image(self):
+        image = np.array([
+            [20, 10, 20, 10, 20, 10],
+            [10, 20, 10, 20, 10, 20],
+            [20, 10, 20, 10, 20, 10],
+            [10, 20, 10, 20, 10, 20]
+        ], dtype=np.uint8).reshape(4, 6, 1)
+
+        image = np.repeat(image, 3, axis=2)
+        cropped_image = ImageService.crop_square_image(image)
+
+        expected_cropped_image = np.array([
+            [10, 20, 10, 20],
+            [20, 10, 20, 10],
+            [10, 20, 10, 20],
+            [20, 10, 20, 10],
+        ], dtype=np.uint8).reshape(4, 4, 1)
+
+        expected_cropped_image = np.repeat(expected_cropped_image, 3, axis=2)
+        np.testing.assert_array_equal(cropped_image, expected_cropped_image)

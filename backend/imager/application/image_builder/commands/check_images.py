@@ -44,7 +44,7 @@ class CheckImagesCommandHandler:
                         f'({min_aspect_ratio:.2f} to {max_aspect_ratio:.2f})')
 
                 if image.shape[2] not in [3, 4] or image.shape[2] == 4 and 'A' not in settings.allowed_formats:
-                    return Result.Error(f'Image {image_file} format is not allowed')
+                    return Result.Error(f'File {image_file} is invalid as image!')
 
             return Result.Success(f'All images in {command.group_name} checked successfully')
         except Exception as e:

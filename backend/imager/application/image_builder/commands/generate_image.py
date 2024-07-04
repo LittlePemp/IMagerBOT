@@ -19,8 +19,9 @@ class GenerateImageCommand:
 
 class GenerateImageCommandHandler:
     def handle(self, command: GenerateImageCommand) -> Result:
-        uow = get_uow()
         try:
+            uow = get_uow()
+
             insertion_format_result = ImageInsertionFormat.create(command.insertion_format)
             if not insertion_format_result.is_success:
                 return insertion_format_result
@@ -48,6 +49,7 @@ class GenerateImageCommandHandler:
             builder = ImagerBuilder(
                 file_repository=uow.file_repository,
                 cell_repository=uow.cell_repository,
+                insertion_format=command.insertion_format,
                 result_size=command.result_size,
                 cell_size=command.cell_size,
                 alpha=command.alpha_channel / 100,
