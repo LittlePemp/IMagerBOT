@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from scipy.spatial import KDTree
 
 
 class ImageService:
@@ -12,6 +13,16 @@ class ImageService:
     @staticmethod
     def resize_image(image: np.ndarray, width: int, height: int) -> np.ndarray:
         return cv2.resize(image, (width, height))
+
+    @staticmethod
+    def crop_square_image(image: np.ndarray) -> np.ndarray:
+        h, w = image.shape[:2]
+        side_length = min(h, w)
+        top = max(0, h // 2 - side_length // 2)
+        left = max(0, w // 2 - side_length // 2)
+        bottom = top + side_length
+        right = left + side_length
+        return image[top:bottom, left:right]
 
     @staticmethod
     def create_template(width: int, height: int) -> np.ndarray:
@@ -28,6 +39,11 @@ class ImageService:
     def overlay_image_alpha(background: np.ndarray, overlay: np.ndarray, alpha: float = 0.5) -> np.ndarray:
         overlay_resized = cv2.resize(overlay, (background.shape[1], background.shape[0]))
         return cv2.addWeighted(background, 1 - alpha, overlay_resized, alpha, 0)
+
+    @staticmethod
+    def find_closest(tree: KDTree, target: tuple[int, int, int]) -> tuple:
+        distance, index = tree.query(target)
+        return distance, index
 
     @staticmethod
     def distance_squared(point1: tuple[int, int, int], point2: tuple[int, int, int]) -> int:
