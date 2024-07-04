@@ -99,9 +99,9 @@ def get_image_data(image_path):
 @cli.command()
 @click.option('--image_path', required=True, help='Path to the image to be processed')
 @click.option('--group_name', required=True, help='Name of the image group')
-@click.option('--insertion_format', default='scale', help='Insertion format: scale or crop')
+@click.option('--insertion_format', default='crop', help='Insertion format: scale or crop')
 @click.option('--alpha_channel', default=30, help='Alpha channel percentage (0-100)')
-@click.option('--noise_level', default=10, help='Noise level for RGB shifts')
+@click.option('--noise_level', default=40, help='Noise level for RGB shifts')
 @click.option('--cell_size', default=60, help='Size of each cell in the final image')
 @click.option('--result_size', default=120, help='Number of cells along the longest side')
 def generate_image(image_path, group_name, insertion_format, alpha_channel, noise_level, cell_size, result_size):

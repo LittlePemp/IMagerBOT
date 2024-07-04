@@ -10,7 +10,7 @@ class ImageInsertionFormat:
 
     @staticmethod
     def create(value) -> Result:
-        if value not in [ImageInsertionFormat.CROP, ImageInsertionFormat.SCALE]:
+        if not isinstance(value, str) or value not in [ImageInsertionFormat.CROP, ImageInsertionFormat.SCALE]:
             return Result.Error('Invalid insertion format')
         return Result.Success(ImageInsertionFormat(value))
 

@@ -25,7 +25,7 @@ class Mediator:
         if request_type in self.handlers:
             handler = self.handlers[request_type]
             return handler.handle(request)
-        raise ValueError(f"No handler registered for {request_type}")
+        raise ValueError(f'No handler registered for {request_type}')
 
 
 mediator = Mediator()
