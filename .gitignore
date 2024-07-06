@@ -163,5 +163,5 @@ cython_debug/
 TEMP/
 imager/files/
 */logs/
-files/
-!files/test_image.png
+imager/files/
+!imager\files\test_image.png

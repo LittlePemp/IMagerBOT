@@ -1,0 +1,4 @@
+pip-check-reqs
+coverage
+api docs
+vulture
