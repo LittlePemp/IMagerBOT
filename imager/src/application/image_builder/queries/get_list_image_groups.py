@@ -1,11 +1,12 @@
+from src.application.image_builder.interfaces_cqrs import IQueryHandler
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
 
 
-class GetListImageGroupsQuery:
+class GetListImageGroupsQuery(IQueryHandler):
     pass
 
 
-class GetListImageGroupsQueryHandler:
+class GetListImageGroupsQueryHandler(IQueryHandler):
     def __init__(self):
         self.uow = get_uow()
 

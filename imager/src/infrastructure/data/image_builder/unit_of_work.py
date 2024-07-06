@@ -1,10 +1,11 @@
 from assimilator.mongo.database import MongoRepository
 from assimilator.mongo.database import MongoUnitOfWork as BaseMongoUnitOfWork
-from src.infrastructure.data.image_builder.models.cell_model import CellModel
-from src.infrastructure.data.image_builder.repositories.cell_repository import CellRepository
-from src.infrastructure.data.image_builder.repositories.file_repository import FileRepository
 from pymongo import MongoClient
 from settings import settings
+
+from .models.cell_model import CellModel
+from .repositories.cell_repository import CellRepository
+from .repositories.file_repository import FileRepository
 
 
 class MongoUnitOfWork(BaseMongoUnitOfWork):

@@ -95,6 +95,6 @@ class TestImagerBuilder(unittest.TestCase):
 
     def test_save_image(self):
         final_image = np.random.randint(0, 255, (120, 120, 3), dtype=np.uint8)
-        path = self.builder.save_image(final_image)
+        path = self.builder.save_image(final_image).value
         self.assertTrue(path.endswith('.png'))
         self.file_repository.save_image_file.assert_called_once()

@@ -1,13 +1,19 @@
+from src.domain.image_builder.value_objects.image_build_params import (
+    AlphaChannel, CellSize, ImageGroup, ImageInsertionFormat, NoiseLevel,
+    ResultSize)
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
 from src.shared_kernel.result import Result
-from src.domain.image_builder.value_objects.image_build_params import (
-    ImageInsertionFormat, AlphaChannel, NoiseLevel, CellSize, ResultSize, ImageGroup
-)
-from src.application.image_builder.services.imager_builder import ImagerBuilder
+
+from ..errors.commands_errors import CommandsErrorMessages
+from ..interfaces_cqrs import ICommand, ICommandHandler
+from ..services.imager_builder import ImagerBuilder
 
 
-class GenerateImageCommand:
-    def __init__(self, image_path, insertion_format, alpha_channel, noise_level, cell_size, result_size, group_name):
+class GenerateImageCommand(ICommand):
+    def __init__(
+        self, image_path, insertion_format, alpha_channel,
+        noise_level, cell_size, result_size, group_name
+    ):
         self.image_path = image_path
         self.insertion_format = insertion_format
         self.alpha_channel = alpha_channel
@@ -17,12 +23,14 @@ class GenerateImageCommand:
         self.group_name = group_name
 
 
-class GenerateImageCommandHandler:
+class GenerateImageCommandHandler(ICommandHandler):
     def handle(self, command: GenerateImageCommand) -> Result:
         try:
             uow = get_uow()
 
-            insertion_format_result = ImageInsertionFormat.create(command.insertion_format)
+            insertion_format_result = ImageInsertionFormat.create(
+                command.insertion_format
+            )
             if not insertion_format_result.is_success:
                 return insertion_format_result
 
@@ -55,10 +63,11 @@ class GenerateImageCommandHandler:
                 alpha=command.alpha_channel / 100,
                 noise_degree=command.noise_level
             )
-            final_image_result = builder.make_image(command.image_path, command.group_name)
+            final_image_result = builder.make_image(command.image_path,
+                                                    command.group_name)
             if not final_image_result.is_success:
                 return final_image_result
 
             return final_image_result
         except Exception as e:
-            return Result.Error(f'An error occurred: {e}')
+            return CommandsErrorMessages.general_error(e)

@@ -1,6 +1,6 @@
 from assimilator.mongo.database.models import MongoModel
-from pydantic import Field
 from bson import ObjectId
+from pydantic import Field
 
 
 class CellModel(MongoModel):
