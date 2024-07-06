@@ -161,6 +161,7 @@ cython_debug/
 
 # my
 TEMP/
-image_builder/data
-backend/files/
-backend/logs/
+imager/files/
+*/logs/
+files/
+!files/test_image.png
