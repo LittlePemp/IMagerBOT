@@ -2,6 +2,8 @@ from typing import Union
 
 from .commands.check_images import (CheckImagesCommand,
                                     CheckImagesCommandHandler)
+from .commands.generate_image import (GenerateImageCommand,
+                                      GenerateImageCommandHandler)
 from .commands.load_images import LoadImagesCommand, LoadImagesCommandHandler
 from .commands.load_missing_groups import (LoadMissingGroupsCommand,
                                            LoadMissingGroupsCommandHandler)
@@ -35,6 +37,8 @@ class Mediator:
 
 mediator = Mediator()
 
+mediator.register(GenerateImageCommand,
+                  GenerateImageCommandHandler())
 mediator.register(LoadImagesCommand,
                   LoadImagesCommandHandler())
 mediator.register(LoadMissingGroupsCommand,
