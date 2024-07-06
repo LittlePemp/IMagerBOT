@@ -1,6 +1,9 @@
 import click
+import uvicorn
 from src.application.image_builder.commands.check_images import \
     CheckImagesCommand
+from src.application.image_builder.commands.generate_image import \
+    GenerateImageCommand
 from src.application.image_builder.commands.load_images import \
     LoadImagesCommand
 from src.application.image_builder.commands.load_missing_groups import \
@@ -14,9 +17,6 @@ from src.application.image_builder.queries.get_image_data import \
     GetImageDataQuery
 from src.application.image_builder.queries.get_list_image_groups import \
     GetListImageGroupsQuery
-
-from src.application.image_builder.commands.generate_image import (
-    GenerateImageCommand, GenerateImageCommandHandler)
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -115,11 +115,18 @@ def generate_image(image_path, group_name, insertion_format, alpha_channel, nois
             result_size=result_size,
             group_name=group_name
         )
-        handler = GenerateImageCommandHandler()
-        result = handler.handle(command)
+        result = mediator.send(command)
         if result.is_success:
             click.echo(f'Image saved at {result.value}')
         else:
             presentation_logger.error(f'Failed to generate image: {result.error}')
     except Exception as e:
         presentation_logger.error(f'An error occurred while generating image: {e}')
+
+
+@cli.command()
+@click.option('--host', default='0.0.0.0', help='Host to run the server on')
+@click.option('--port', default=8000, help='Port to run the server on')
+def runserver(host, port):
+    '''Run the FastAPI server.'''
+    uvicorn.run('src.presentation.api.main:app', host=host, port=port,)
