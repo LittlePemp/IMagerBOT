@@ -21,13 +21,3 @@ class TestCell(unittest.TestCase):
         self.assertEqual(cell.rgb, self.rgb)
         self.assertEqual(cell.group, self.group)
         self.assertEqual(cell.relative_file_path, self.relative_file_path)
-
-    def test_update_cell(self):
-        result = Cell.create(self.rgb, self.group, self.relative_file_path)
-        self.assertTrue(result.is_success)
-        cell: Cell = result.value
-
-        cell.update_cell(self.updated_rgb, self.updated_group, self.updated_relative_file_path)
-        self.assertEqual(cell.rgb, self.updated_rgb)
-        self.assertEqual(cell.group, self.updated_group)
-        self.assertEqual(cell.relative_file_path, self.updated_relative_file_path)

@@ -9,7 +9,9 @@ class KDTreeService:
             points = []
             cell_objects = []
             for cell_obj in cell_infos.values():
-                rgb = (cell_obj.cell.rgb.r.value, cell_obj.cell.rgb.g.value, cell_obj.cell.rgb.b.value)
+                rgb = (cell_obj.cell.rgb.r.value,
+                       cell_obj.cell.rgb.g.value,
+                       cell_obj.cell.rgb.b.value)
                 points.append(rgb)
                 cell_objects.append(cell_obj)
             if points:

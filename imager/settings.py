@@ -23,7 +23,7 @@ class Settings:
         self.allowed_formats = ['RGB', 'RGBA']
         self.min_size = (20, 20)
         self.max_size = (4000, 4000)
-        self.aspect_ratio_limits = (9/16, 16/9)
+        self.aspect_ratio_limits = (9 / 16, 16 / 9)
 
         self.create_directories()
 
