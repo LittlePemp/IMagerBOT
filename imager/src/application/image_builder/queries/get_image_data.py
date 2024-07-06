@@ -1,12 +1,14 @@
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
 
+from ..interfaces_cqrs import IQuery, IQueryHandler
 
-class GetImageDataQuery:
+
+class GetImageDataQuery(IQuery):
     def __init__(self, image_path: str):
         self.image_path = image_path
 
 
-class GetImageDataQueryHandler:
+class GetImageDataQueryHandler(IQueryHandler):
     def __init__(self):
         self.uow = get_uow()
 

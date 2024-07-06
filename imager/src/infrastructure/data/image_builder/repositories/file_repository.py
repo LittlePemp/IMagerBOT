@@ -1,10 +1,11 @@
 import os
+
 import cv2
 import numpy as np
-from src.shared_kernel.result import Result
-from src.shared_kernel.loggers import db_logger
-from src.domain.image_builder.services.image_service import ImageService
 from settings import settings
+from src.domain.image_builder.services.image_service import ImageService
+from src.shared_kernel.loggers import db_logger
+from src.shared_kernel.result import Result
 
 
 class FileRepository:
@@ -15,12 +16,17 @@ class FileRepository:
     def read_image_file(self, relative_path: str) -> Result:
         image = cv2.imread(relative_path, cv2.IMREAD_UNCHANGED)
         if image is None:
-            return Result.Error(f"Image not found at path: {relative_path}")
+            return Result.Error(f'Image not found at path: {relative_path}')
         return Result.Success(image)
 
     def save_image_file(self, image: np.ndarray, relative_path: str) -> None:
-        cv2.imwrite(relative_path, image)
-        db_logger.info(f'Image saved at {relative_path}')
+        try:
+            cv2.imwrite(relative_path, image)
+            db_logger.info(f'Image saved at {relative_path}')
+            return Result.Success('Image successgully saved')
+        except Exception as e:
+            db_logger.error('Can not write image')
+            return Result.Error(e)
 
     def list_image_files(self, directory_path: str) -> list[str]:
         supported_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
@@ -49,7 +55,7 @@ class FileRepository:
         return Result.Success(cell_data)
 
     def save_image(self, image_data) -> None:
-        db_logger.info(f'SAVED {image_data["relative_file_path"]}')
+        db_logger.info(f'SAVED {image_data['relative_file_path']}')
 
     def get_all_groups(self) -> list[str]:
         base_path = self.settings.image_groups_relative_path
@@ -69,4 +75,4 @@ class FileRepository:
             os.remove(relative_path)
             db_logger.info(f'Image deleted at {relative_path}')
         except Exception as e:
-            db_logger.error(f"Error deleting file: {e}")
+            db_logger.error(f'Error deleting file: {e}')
