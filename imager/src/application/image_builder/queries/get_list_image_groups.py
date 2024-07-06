@@ -1,8 +1,8 @@
-from src.application.image_builder.interfaces_cqrs import IQueryHandler
+from src.application.image_builder.interfaces_cqrs import IQueryHandler, IQuery
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
 
 
-class GetListImageGroupsQuery(IQueryHandler):
+class GetListImageGroupsQuery(IQuery):
     pass
 
 
