@@ -55,7 +55,7 @@ class TestCellObject(unittest.TestCase):
     def test_create_from_image_invalid_image_open(self, mock_imread):
         result = CellObject.create_from_image(self.rgb, self.group, self.invalid_path)
         self.assertFalse(result.is_success)
-        self.assertIn("Error opening image at", result.error)
+        self.assertIn("Error opening image", result.error)
 
     def test_str(self):
         cell_object = CellObject(self.cell, np.zeros((10, 10, 3)))

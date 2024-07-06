@@ -1,5 +1,7 @@
 from src.shared_kernel.result import Result
 
+from ..errors.entities_errors import EntitiesErrorMessages
+
 
 class ColorDefinition:
     def __init__(self, value: int):
@@ -8,10 +10,10 @@ class ColorDefinition:
     @staticmethod
     def create(value: int) -> Result:
         if not isinstance(value, int):
-            return Result.Error('RGB must be an integer')
+            return EntitiesErrorMessages.rgb_must_be_an_integer()
 
         if not (0 <= value <= 255):
-            return Result.Error('RGB must be in [0..255]')
+            return EntitiesErrorMessages.rgb_must_be_in_range()
 
         return Result.Success(ColorDefinition(value))
 

@@ -36,8 +36,8 @@ class CheckImagesCommandHandler(ICommandHandler):
                 height, width = image.shape[:2]
                 min_width, min_height = settings.min_size
                 max_width, max_height = settings.max_size
-                if not (min_width <= width <= max_width and
-                        min_height <= height <= max_height):
+                if not (min_width <= width <= max_width
+                        and min_height <= height <= max_height):
                     return CommandsErrorMessages.image_size_out_of_bounds(
                         image_file, width, height, min_width, min_height,
                         max_width, max_height)
