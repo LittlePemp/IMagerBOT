@@ -2,3 +2,11 @@ pip-check-reqs
 coverage
 api docs
 vulture
+
+.env test
+MONGODB_URI=mongodb://localhost:27017
+DATABASE_NAME=imager_db
+IMAGE_GROUPS_RELATIVE_PATH=files/groups
+UPLOADED_IMAGES_PATH=files/uploaded
+GENERATED_IMAGES_PATH=files/generated
+
