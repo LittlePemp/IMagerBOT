@@ -1,13 +1,12 @@
+from src.presentation.api.workers import start_workers
 from fastapi import FastAPI
 from prometheus_client import Counter, start_http_server
 from src.presentation.api import routers
 
 app = FastAPI()
 
-# Prometheus
 start_http_server(8001)
 
-# metrics
 REQUEST_COUNT = Counter('request_count', 'Total number of requests')
 
 
@@ -19,3 +18,7 @@ async def add_metrics(request, call_next):
 
 
 app.include_router(routers.router, prefix='/api')
+
+@app.on_event("startup")
+async def startup_event():
+    start_workers()
