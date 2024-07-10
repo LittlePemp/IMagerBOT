@@ -1,8 +1,13 @@
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from src.application.image_builder.mediator import mediator
+from src.application.image_builder.queries.get_list_image_groups import \
+    GetListImageGroupsQuery
 from src.presentation.api.schemas import (GenerateImageRequest,
-                                          GenerateImageResponse)
+                                          GenerateImageResponse,
+                                          ListGroupsResponse)
+from src.shared_kernel.loggers import presentation_logger
 
 router = APIRouter()
 
@@ -22,3 +27,13 @@ async def generate_image(request: GenerateImageRequest):
         'future': future
     })
     return await future
+
+@router.get("/list-groups", response_model=ListGroupsResponse)
+async def list_groups():
+    try:
+        query = GetListImageGroupsQuery()
+        groups = await asyncio.to_thread(mediator.send, query)
+        return ListGroupsResponse(groups=groups)
+    except Exception as e:
+        presentation_logger.error(f'An error occurred while listing groups: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
