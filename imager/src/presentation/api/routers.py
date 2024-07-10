@@ -13,7 +13,7 @@ router = APIRouter()
 
 queue = asyncio.Queue()
 
-@router.post("/generate-image", response_model=GenerateImageResponse)
+@router.post("/v1/generate-image", response_model=GenerateImageResponse)
 async def generate_image(request: GenerateImageRequest):
     future = asyncio.Future()
     await queue.put({
@@ -28,7 +28,7 @@ async def generate_image(request: GenerateImageRequest):
     })
     return await future
 
-@router.get("/list-groups", response_model=ListGroupsResponse)
+@router.get("/v1/list-groups", response_model=ListGroupsResponse)
 async def list_groups():
     try:
         query = GetListImageGroupsQuery()
