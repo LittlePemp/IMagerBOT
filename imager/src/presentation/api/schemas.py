@@ -13,3 +13,7 @@ class GenerateImageRequest(BaseModel):
 
 class GenerateImageResponse(BaseModel):
     path: str
+
+
+class ListGroupsResponse(BaseModel):
+    groups: list[str]
