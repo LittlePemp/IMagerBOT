@@ -1,7 +1,7 @@
 from loguru import logger
 
 logger.add(
-    'logs/db_{time}.log',
+    'logs/database_{time}.log',
     rotation='1 week',
     retention='1 month',
     level='DEBUG',

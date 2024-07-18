@@ -4,7 +4,7 @@ logger.add(
     'logs/bot_requests_{time}.log',
     rotation='1 week',
     retention='1 month',
-    level='ERROR',
+    level='INFO',
     format='{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}',
     enqueue=True
 )

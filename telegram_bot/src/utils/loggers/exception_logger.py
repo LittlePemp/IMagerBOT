@@ -1,7 +1,7 @@
 from loguru import logger
 
 logger.add(
-    'logs/exception_{time}.log',
+    'logs/exceptions_{time}.log',
     rotation='1 week',
     retention='1 month',
     level='ERROR',
