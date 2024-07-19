@@ -12,3 +12,6 @@ class User(BaseModel):
     last_activity_datetime_utc: datetime
     isbanned: bool
     status: str  # admin/user/privileged
+
+    class Config:
+        arbitrary_types_allowed = True
