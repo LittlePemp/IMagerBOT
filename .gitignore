@@ -163,7 +163,7 @@ cython_debug/
 .vscode
 TEMP/
 imager/files/
-*/logs/
+*logs/
 imager/files/
 files/
 !imager\files\test_image.png

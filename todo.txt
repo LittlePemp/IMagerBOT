@@ -2,6 +2,12 @@ pip-check-reqs
 coverage
 api docs
 vulture
+fix loggers
+__all__
+in api to dirs
+imager service realize
+инфа об картинках?
+worker imager refactor
 
 .env test
 MONGODB_URI=mongodb://localhost:27017
@@ -9,4 +15,9 @@ DATABASE_NAME=imager_db
 IMAGE_GROUPS_RELATIVE_PATH=files/groups
 UPLOADED_IMAGES_PATH=files/uploaded
 GENERATED_IMAGES_PATH=files/generated
+
+workers in settings
+
+imager:
+uow as context manager
 
