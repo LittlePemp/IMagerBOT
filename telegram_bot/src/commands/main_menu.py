@@ -1,20 +1,24 @@
-from aiogram import types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram import Dispatcher
+from aiogram import Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-async def main_menu(message: Message, is_admin: bool):
-    buttons = [
-        [KeyboardButton(text='О боте')],
-        [KeyboardButton(text='Поддержка')],
-        [KeyboardButton(text='Собрать изображение')]
-    ]
-    if is_admin:
-        buttons.append([KeyboardButton(text='Админ панель')])
+from src.infrastructure.data.models.user import User
+from src.utils.loggers import bot_requests_logger
+
+
+async def main_menu(message: types.Message, user: User):
+    bot_requests_logger.info(f"Handling main menu for user: {user.telegram_id}, is_admin: {user.is_admin}")
+    builder = InlineKeyboardBuilder()
+    builder.button(text='About', callback_data='about')
+    builder.button(text='Generate Image', callback_data='generate_image')
+    builder.button(text='Support', callback_data='support')
+    if user.is_admin:
+        builder.button(text='Admin Panel', callback_data='admin_panel')
+    builder.adjust(2)
     
-    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    await message.answer('Главное меню', reply_markup=keyboard)
+    await message.answer('Main Menu', reply_markup=builder.as_markup())
+    bot_requests_logger.info("Main menu sent")
 
 def register_handlers_main_menu(dp: Dispatcher):
     dp.message.register(main_menu, Command('start'))
+    dp.message.register(main_menu, Command('menu'))

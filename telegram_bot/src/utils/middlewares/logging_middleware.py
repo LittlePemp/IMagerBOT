@@ -8,6 +8,10 @@ class LoggingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         data['service'] = data.get('service', 'unknown_service')
         self.logger.info(f'Received event: {event}', extra={'service': data['service']})
-        result = await handler(event, data)
-        self.logger.info(f'Processed event: {event} with result: {result}', extra={'service': data['service']})
-        return result
+        try:
+            result = await handler(event, data)
+            self.logger.info(f'Processed event: {event} with result: {result}', extra={'service': data['service']})
+            return result
+        except Exception as e:
+            self.logger.error(f'Error processing event: {event} with error: {e}', extra={'service': data['service']})
+            raise
