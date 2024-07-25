@@ -1,32 +1,32 @@
 import os
+from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings
 
-load_dotenv()
 
+class Settings(BaseSettings):
+    api_token: SecretStr
+    mongodb_uri: str
+    imager_service_url: str
+    telegram_admin_ids: str  # List read fix
+    database_name: str = 'telegram_bot'
+    image_groups_relative_path: str = 'files/groups'
+    uploaded_images_path: str = 'files/uploaded'
+    generated_images_path: str = 'files/generated'
+    tzinfo: ZoneInfo = ZoneInfo('Europe/Moscow')
 
-class Settings:
-    def __init__(self):
-        self.api_token = os.getenv('API_TOKEN')
-        self.mongodb_uri = os.getenv('MONGODB_URI')
-        self.imager_service_url = os.getenv('IMAGER_SERVICE_URL')
-        self.database_name = os.getenv('DATABASE_NAME')
-        self.image_groups_relative_path = os.getenv(
-            'IMAGE_GROUPS_RELATIVE_PATH',
-            'files/groups')
-        self.uploaded_images_path = os.getenv(
-            'UPLOADED_IMAGES_PATH',
-            'files/uploaded')
-        self.generated_images_path = os.getenv(
-            'GENERATED_IMAGES_PATH',
-            'files/generated')
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.telegram_admin_ids = [int(x) for x in self.telegram_admin_ids.split('|')]
 
-        self.create_directories()
+    class Config:
+        env_file = '.env'
+        env_file_encoding = 'utf-8'
 
     def create_directories(self):
         os.makedirs(self.image_groups_relative_path, exist_ok=True)
         os.makedirs(self.uploaded_images_path, exist_ok=True)
         os.makedirs(self.generated_images_path, exist_ok=True)
-
 
 settings = Settings()

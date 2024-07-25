@@ -1,20 +1,15 @@
 from aiogram import Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message
+from src.utils.filters.admin_filter import AdminFilter
 
-async def admin_panel(message: Message, is_admin: bool):
-    if not is_admin:
-        await message.answer('У вас нет доступа к этой панели.')
-        return
+from .admin_panel_keyboard import get_admin_panel_keyboard
 
-    buttons = [
-        [KeyboardButton(text='Управление группами изображений')],
-        [KeyboardButton(text='Управление пользователями')],
-        [KeyboardButton(text='Настройки')]
-    ]
-    
-    keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+async def admin_panel(message: Message, user):
+    keyboard = get_admin_panel_keyboard()
     await message.answer('Админ панель', reply_markup=keyboard)
 
 def register_handlers_admin_panel(dp: Dispatcher):
-    dp.message.register(admin_panel, Command('admin'))
+    dp.message.register(admin_panel, Command('admin'), AdminFilter())
+    dp.message.register(admin_panel, lambda message, data: message.text == 'Админ панель', AdminFilter())
