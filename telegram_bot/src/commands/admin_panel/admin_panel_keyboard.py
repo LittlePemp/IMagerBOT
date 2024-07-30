@@ -1,11 +1,7 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def get_admin_panel_keyboard():
-    buttons = [
-        [KeyboardButton(text='Управление группами изображений')],
-        [KeyboardButton(text='Управление пользователями')],
-        [KeyboardButton(text='Настройки')],
-        [KeyboardButton(text='В меню')]
-    ]
-    
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+def admin_panel_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text='Пользователи', callback_data='admin_panel:users')
+    builder.adjust(1)
+    return builder.as_markup()
