@@ -12,7 +12,7 @@ async def make_admin(message: Message, user_repository: UserRepository, user):
         user_id = int(message.get_args())
         target_user = await user_repository.get_user_by_id(user_id)
         if target_user:
-            await user_repository.update_user(user_id, {"status": "admin"})
+            await user_repository.update_user(user_id, {'status': 'admin'})
             await message.answer(f'Пользователь с ID {user_id} теперь администратор.')
         else:
             await message.answer(f'Пользователь с ID {user_id} не найден.')
