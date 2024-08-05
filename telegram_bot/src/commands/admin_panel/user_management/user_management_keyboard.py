@@ -1,10 +1,14 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def get_user_management_keyboard():
-    buttons = [
-        [KeyboardButton(text='Назначить админа')],
-        [KeyboardButton(text='Удалить пользователя')],
-        [KeyboardButton(text='В меню')]
-    ]
-    
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+def user_action_keyboard(isbanned, is_admin):
+    builder = InlineKeyboardBuilder()
+    if isbanned:
+        builder.button(text='Разблокировать пользователя', callback_data='user_action:unblock_user')
+    else:
+        builder.button(text='Заблокировать пользователя', callback_data='user_action:block_user')
+    if is_admin:
+        builder.button(text='Снять администратора', callback_data='user_action:remove_admin')
+    else:
+        builder.button(text='Назначить администратора', callback_data='user_action:make_admin')
+    builder.adjust(1)
+    return builder.as_markup()

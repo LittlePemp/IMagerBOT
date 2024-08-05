@@ -16,12 +16,15 @@ class AuthenticationMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event: Message, data: dict):
         user_id = event.from_user.id
+        username = event.from_user.username
+        full_name = event.from_user.full_name
+
         user = await self.user_repository.get_user_by_id(user_id)
         if user is None:
             user_data = {
-                'telegram_username': event.from_user.username,
+                'telegram_username': username,
                 'telegram_id': user_id,
-                'name': event.from_user.full_name,
+                'name': full_name,
                 'registered_datetime_utc': datetime.now(settings.tzinfo),
                 'last_activity_datetime_utc': datetime.now(settings.tzinfo),
                 'isbanned': False,
@@ -36,11 +39,17 @@ class AuthenticationMiddleware(BaseMiddleware):
                     user = await self.user_repository.get_user_by_id(user_id)
                 else:
                     exception_logger.error(f'Failed to add new user: {user.telegram_id}')
+                    return
             else:
                 exception_logger.error(f'Failed to create user: {user_result.error}')
-                return  # TODO: return what?
+                return
         else:
-            await self.user_repository.update_last_activity(user_id)
+            await self.user_repository.update_user_info(user_id, username, full_name)
+
+        if user.isbanned:
+            exception_logger.warning(f'Blocked user attempted access: {user.telegram_id}')
+            await event.answer('Вы заблокированы и не можете использовать этого бота.')
+            return
 
         bot_requests_logger.info(f'Authenticated user: {user.telegram_id}')
         data['user'] = user
