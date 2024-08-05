@@ -7,8 +7,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from settings import settings
 from src.commands.admin_panel.admin_panel_handler import \
     register_handlers_admin_panel
-from src.commands.admin_panel.user_management.user_management_handler import \
-    register_handlers_user_management
+from src.commands.admin_panel.user_management import \
+    register_handlers_user_management_total
 from src.commands.main_menu import register_handlers_main_menu
 from src.infrastructure.data.models.user import User, UserStatus
 from src.infrastructure.data.unit_of_work import get_uow
@@ -17,6 +17,7 @@ from src.utils.middlewares.authentication_middleware import \
     AuthenticationMiddleware
 
 from src.utils.loggers import exception_logger
+from src.utils.loggers import bot_requests_logger
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +29,9 @@ mongo_client = AsyncIOMotorClient(settings.mongodb_uri)
 db = mongo_client.get_database(settings.database_name)
 uow = get_uow(db)
 
+# bot context
+setattr(bot, 'user_repository', uow.user_repository)
+
 # Middlewares
 dp.update.outer_middleware(logging_middleware)
 dp.message.middleware(AuthenticationMiddleware(uow.user_repository))
@@ -37,13 +41,27 @@ dp.message.middleware(AuthenticationMiddleware(uow.user_repository))
 # Register handlers
 register_handlers_main_menu(dp)
 register_handlers_admin_panel(dp)
-# register_handlers_user_management(dp, uow.user_repository)
+register_handlers_user_management_total(dp)
 
 async def set_initial_admin():
     async with uow as uow_instance:
         admins = await uow_instance.user_repository.get_admins()
         if not admins:
-            exception_logger.error('Failed to fetch admins')
+            default_admin_id = settings.telegram_admin_ids[0]
+            user_data = User(
+                telegram_id=default_admin_id,
+                telegram_username='admin',
+                name='Admin',
+                registered_datetime_utc=datetime.now(settings.tzinfo),
+                last_activity_datetime_utc=datetime.now(settings.tzinfo),
+                isbanned=False,
+                status=UserStatus.ADMIN
+            )
+            success = await uow_instance.user_repository.add_user(user_data)
+            if success:
+                bot_requests_logger.info(f'Default admin added: {default_admin_id}')
+            else:
+                exception_logger.error(f'Failed to add default admin: {default_admin_id}')
             return
 
         settings.telegram_admin_ids.extend(

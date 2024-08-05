@@ -42,6 +42,17 @@ class UserRepository:
             exception_logger.error(f'Failed to get user by id {telegram_id}: {e}')
             return None
 
+    async def get_user_by_username(self, username: str) -> Optional[User]:
+        try:
+            user_data = await self.collection.find_one({'telegram_username': username})
+            if user_data:
+                user_data.pop('_id', None)
+                return User(**user_data)
+            return None
+        except Exception as e:
+            exception_logger.error(f'Failed to get user by username {username}: {e}')
+            return None
+
     async def update_user(self, telegram_id: int, update_data: dict) -> bool:
         try:
             result = await self.collection.update_one({'telegram_id': telegram_id}, {'$set': update_data})
@@ -66,6 +77,33 @@ class UserRepository:
         except Exception as e:
             exception_logger.error(f'Failed to update last activity for user {telegram_id}: {e}')
             return False
+
+    async def update_user_info(self, user_id: int, username: str, full_name: str) -> bool:
+        try:
+            update_data = {
+                'telegram_username': username,
+                'name': full_name,
+                'last_activity_datetime_utc': datetime.now(settings.tzinfo)
+            }
+            result = await self.collection.update_one(
+                {'telegram_id': user_id},
+                {'$set': update_data}
+            )
+            if result.matched_count:
+                db_logger.info(f'User info updated for user {user_id}')
+                return True
+            return False
+        except Exception as e:
+            exception_logger.error(f'Failed to update user info for user {user_id}: {e}')
+            return False
+
+    async def get_user_count(self) -> int:
+        try:
+            users_cnt = await self.collection.count_documents({})
+            return users_cnt
+        except Exception as e:
+            db_logger.error(f'Failed to get admins: {e}')
+            return 0
 
     async def get_admins(self) -> list[User]:
         try:
