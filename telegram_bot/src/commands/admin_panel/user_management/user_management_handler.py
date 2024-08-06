@@ -22,8 +22,8 @@ async def receive_username_or_id(message: Message, state: FSMContext):
     user = await fetch_user(user_input, user_repository)
 
     if not user:
-        await message.answer('Пользователь не найден. Попробуйте еще раз.')
-        return
+        await message.answer('Пользователь не найден.')
+        await state.clear()
 
     user_info = format_user_info(user)
     await state.update_data(user_id=user.telegram_id, isbanned=user.isbanned, is_admin=(user.status == UserStatus.ADMIN))

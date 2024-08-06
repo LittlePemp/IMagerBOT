@@ -2,6 +2,7 @@ from aiogram import Dispatcher, types, F
 from aiogram.filters import Command
 from src.utils.filters.request_filters.admin_filter import AdminFilter
 from src.utils.loggers import bot_requests_logger
+from src.commands.admin_panel.image_build_params.image_build_params_handler import register_handlers_image_build_params
 
 from .admin_panel_keyboard import admin_panel_keyboard
 
