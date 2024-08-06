@@ -10,7 +10,7 @@ from src.commands.admin_panel.admin_panel_handler import \
 from src.commands.admin_panel.user_management import \
     register_handlers_user_management_total
 from src.commands.main_menu import register_handlers_main_menu
-from src.infrastructure.data.models.user import User, UserStatus
+from src.models.user import User, UserStatus
 from src.infrastructure.data.unit_of_work import get_uow
 from src.utils.middlewares import logging_middleware
 from src.utils.middlewares.authentication_middleware import \

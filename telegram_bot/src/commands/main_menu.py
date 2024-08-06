@@ -2,7 +2,7 @@ from aiogram import Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from src.infrastructure.data.models.user import User
+from src.models.user import User, UserStatus
 from src.utils.loggers import bot_requests_logger
 
 
