@@ -4,7 +4,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message
 from src.utils.loggers import exception_logger
 from settings import settings
-from src.infrastructure.data.models.user import User, UserStatus
+from src.models.user import User, UserStatus
 from src.infrastructure.data.repositories.user_repository import UserRepository
 from src.utils.loggers import bot_requests_logger
 

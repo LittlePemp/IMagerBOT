@@ -3,7 +3,7 @@ from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorCollection
 from settings import settings
-from src.infrastructure.data.models.user import User
+from src.models.user import User
 from src.utils.building_blocks.result import Result
 from src.utils.loggers import db_logger, exception_logger
 

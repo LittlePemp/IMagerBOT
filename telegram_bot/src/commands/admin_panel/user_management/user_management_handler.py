@@ -5,7 +5,7 @@ from src.infrastructure.data.repositories.user_repository import UserRepository
 from src.utils.loggers import bot_requests_logger
 from src.commands.admin_panel.user_management.user_management_states import UserManagementStates
 from src.commands.admin_panel.user_management.user_management_keyboard import user_action_keyboard
-from src.infrastructure.data.models.user import User, UserStatus
+from src.models.user import User, UserStatus
 
 
 async def user_management(callback: CallbackQuery, state: FSMContext):

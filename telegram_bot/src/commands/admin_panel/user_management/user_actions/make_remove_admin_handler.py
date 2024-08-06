@@ -3,7 +3,7 @@ from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from src.infrastructure.data.repositories.user_repository import UserRepository
 from src.commands.admin_panel.user_management.user_management_states import UserManagementStates
-from src.infrastructure.data.models.user import UserStatus
+from src.models.user import UserStatus
 from ..user_management_handler import format_user_info
 from .user_action_keyboard import back_to_status_keyboard
 

@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from src.infrastructure.data.repositories.user_repository import UserRepository
 from src.utils.loggers import db_logger, exception_logger
+from src.infrastructure.data.repositories.image_build_repository import ImageBuildParamsRepository
 
 
 class MongoUnitOfWork:
@@ -16,6 +17,7 @@ class MongoUnitOfWork:
             return
         self.db = db
         self.user_repository = UserRepository(db['users'])
+        self.image_build_params_repository = ImageBuildParamsRepository(db['image_build_params'])
         self.session = None
         self._initialized = True
 
