@@ -9,7 +9,7 @@ Imager (imager/) — это основная логика сборки прил�
 
 [Оригинал картинки](https://disk.yandex.ru/d/riH4YCdRikEelQ)
 
-[Собранная IMager картинка](https://disk.yandex.ru/i/TVr7V8AwB1QTDA)
+[Собранная IMager картинка](https://disk.yandex.ru/d/xRgpdRCrlDonrw)
 
 ### Технологии
 - **Python 3.12**
