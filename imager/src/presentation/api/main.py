@@ -19,6 +19,6 @@ async def add_metrics(request, call_next):
 
 app.include_router(routers.router, prefix='/api')
 
-@app.on_event("startup")
+@app.on_event('startup')
 async def startup_event():
     start_workers()
