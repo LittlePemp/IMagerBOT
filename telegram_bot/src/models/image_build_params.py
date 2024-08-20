@@ -33,18 +33,3 @@ class NoiseLevel(CommonParam):
 
 class InsetSize(CommonParam):
     type: ParamType = ParamType.INSET_SIZE
-
-
-class ImageGroup(BaseModel):
-    name: str
-    display_name: str
-    service_name: str
-    active: bool
-
-    @classmethod
-    def create(cls, **kwargs) -> Result:
-        try:
-            image_group = cls(**kwargs)
-            return Result.Success(image_group)
-        except ValidationError as e:
-            return Result.Error(f'Validation error: {e}')

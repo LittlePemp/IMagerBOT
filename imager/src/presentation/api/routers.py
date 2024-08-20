@@ -32,8 +32,8 @@ async def generate_image(request: GenerateImageRequest):
 async def list_groups():
     try:
         query = GetListImageGroupsQuery()
-        groups = await asyncio.to_thread(mediator.send, query)
-        return ListGroupsResponse(groups=groups)
+        groups_info = await asyncio.to_thread(mediator.send, query)
+        return ListGroupsResponse(groups=groups_info)
     except Exception as e:
         presentation_logger.error(f'An error occurred while listing groups: {e}')
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,5 +1,5 @@
 import httpx
-from src.infrastructure.services.imager_service.schemas import GenerateImageRequest, GenerateImageResponse, ListGroupsResponse
+from src.infrastructure.services.imager_service.schemas import GenerateImageRequest, GenerateImageResponse, GroupInfo, ListGroupsResponse
 from settings import settings
 
 class ImagerService:
@@ -10,7 +10,9 @@ class ImagerService:
         async with httpx.AsyncClient() as client:
             response = await client.get(f'{self.base_url}/v1/list-groups')
             response.raise_for_status()
-            return ListGroupsResponse(groups=response.json()['groups'])
+            groups_data = response.json()['groups']
+            groups = [GroupInfo(**group) for group in groups_data]
+            return ListGroupsResponse(groups=groups)
 
     async def generate_image(self, request: GenerateImageRequest) -> GenerateImageResponse:
         async with httpx.AsyncClient() as client:

@@ -11,4 +11,4 @@ class GetListImageGroupsQueryHandler(IQueryHandler):
         self.uow = get_uow()
 
     def handle(self, query: GetListImageGroupsQuery) -> list:
-        return self.uow.cell_repository.get_all_groups()
+        return self.uow.cell_repository.get_all_groups_info()
