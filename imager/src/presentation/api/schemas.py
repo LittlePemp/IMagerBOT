@@ -15,5 +15,9 @@ class GenerateImageResponse(BaseModel):
     path: str
 
 
+class GroupInfo(BaseModel):
+    group: str
+    count: int
+
 class ListGroupsResponse(BaseModel):
-    groups: list[str]
+    groups: list[GroupInfo]

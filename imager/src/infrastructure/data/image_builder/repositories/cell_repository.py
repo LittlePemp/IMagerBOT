@@ -122,6 +122,15 @@ class CellRepository(IRepository):
         results = self.mongo_repository._collection.aggregate(pipeline)
         return [result['_id'] for result in results]
 
+    def get_all_groups_info(self) -> list[dict]:
+        pipeline = [
+            {'$group': {'_id': '$group', 'count': {'$sum': 1}}},
+            {'$project': {'_id': 0, 'group': '$_id', 'count': 1}}
+        ]
+        results = list(self.mongo_repository._collection.aggregate(pipeline))
+
+        return results
+
     def __build_trees(self):
         self._trees = KDTreeService.build_trees(self._data)
 
