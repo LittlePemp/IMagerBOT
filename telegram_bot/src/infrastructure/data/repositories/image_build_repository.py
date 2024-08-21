@@ -1,8 +1,9 @@
 from motor.motor_asyncio import AsyncIOMotorCollection
 from typing import List
-from src.models.image_build_params import CommonParam, ImageGroup, ParamType
+from src.models.image_build_params import CommonParam, ParamType
 from src.utils.loggers import db_logger, exception_logger
 from src.utils.building_blocks.result import Result
+from src.models.image_group import ImageGroup
 
 class ImageBuildParamsRepository:
     _instance = None

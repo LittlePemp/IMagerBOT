@@ -29,5 +29,9 @@ class ImageGroup(BaseModel):
         except ValidationError as e:
             return Result.Error(f'Validation error: {e}')
 
+    @property
+    def active(self):
+        return self.status == GroupStatus.ACTIVE
+
     class Config:
         arbitrary_types_allowed = True
