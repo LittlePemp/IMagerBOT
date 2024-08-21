@@ -8,7 +8,7 @@ class ImagerService:
 
     async def list_groups(self) -> ListGroupsResponse:
         async with httpx.AsyncClient() as client:
-            response = await client.get(f'{self.base_url}/v1/list-groups')
+            response = await client.get(f'{self.base_url}v1/list-groups')
             response.raise_for_status()
             groups_data = response.json()['groups']
             groups = [GroupInfo(**group) for group in groups_data]
@@ -16,8 +16,6 @@ class ImagerService:
 
     async def generate_image(self, request: GenerateImageRequest) -> GenerateImageResponse:
         async with httpx.AsyncClient() as client:
-            response = await client.post(f'{self.base_url}/v1/generate-image', json=request.model_dump())
+            response = await client.post(f'{self.base_url}v1/generate-image', json=request.model_dump())
             response.raise_for_status()
             return GenerateImageResponse(path=response.json()['path'])
-
-imager_service = ImagerService(settings.imager_service_url)
