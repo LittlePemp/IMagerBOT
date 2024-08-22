@@ -1,3 +1,4 @@
+from settings import settings
 from src.domain.image_builder.value_objects.image_build_params import (
     AlphaChannel, CellSize, ImageGroup, ImageInsertionFormat, NoiseLevel,
     ResultSize)
@@ -63,7 +64,8 @@ class GenerateImageCommandHandler(ICommandHandler):
                 alpha=command.alpha_channel / 100,
                 noise_degree=command.noise_level
             )
-            final_image_result = builder.make_image(command.image_path,
+            image_path = settings.file_path_prefix + command.image_path
+            final_image_result = builder.make_image(image_path,
                                                     command.group_name)
             if not final_image_result.is_success:
                 return final_image_result

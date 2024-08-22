@@ -54,9 +54,6 @@ class FileRepository:
 
         return Result.Success(cell_data)
 
-    def save_image(self, image_data) -> None:
-        db_logger.info(f'SAVED {image_data['relative_file_path']}')
-
     def get_all_groups(self) -> list[str]:
         base_path = self.settings.image_groups_relative_path
         return [

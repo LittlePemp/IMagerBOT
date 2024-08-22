@@ -9,6 +9,10 @@ class Settings:
     def __init__(self):
         self.mongodb_uri = os.getenv('MONGODB_URI')
         self.database_name = os.getenv('DATABASE_NAME')
+        self.file_path_prefix = os.getenv(
+            'FILE_PATH_PREFIX',
+            ''
+        )
         self.image_groups_relative_path = os.getenv(
             'IMAGE_GROUPS_RELATIVE_PATH',
             'files/groups')
