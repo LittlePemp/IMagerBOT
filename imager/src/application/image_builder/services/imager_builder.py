@@ -142,10 +142,11 @@ class ImagerBuilder:
         return result_tile
 
     def save_image(self, final_image: np.ndarray) -> str:
-        final_image_path = os.path.join(settings.generated_images_path,
-                                        f'IMager_{uuid4()}.png')
+        final_image_name = f'IMager_{uuid4()}.png'
+        final_image_path = os.path.join(settings.file_path_prefix + settings.generated_images_path,
+                                        final_image_name)
         result: Result = self.file_repository.save_image_file(final_image,
                                                               final_image_path)
         if result.is_success:
-            return Result.Success(final_image_path)
+            return Result.Success(final_image_name)
         return Result.Error(result.error)
