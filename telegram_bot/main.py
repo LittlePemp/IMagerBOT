@@ -19,6 +19,7 @@ from src.utils.middlewares.authentication_middleware import \
 from src.utils.loggers import exception_logger
 from src.utils.loggers import bot_requests_logger
 from src.commands.admin_panel.image_build_params.image_build_params_handler import register_handlers_image_build_params
+from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
 
 logging.basicConfig(level=logging.INFO)
 
@@ -44,6 +45,7 @@ register_handlers_main_menu(dp)
 register_handlers_admin_panel(dp)
 register_handlers_user_management_total(dp)
 register_handlers_image_build_params(dp, uow)
+register_handlers_image_generation(dp, uow)
 
 async def set_initial_admin():
     async with uow as uow_instance:

@@ -1,4 +1,5 @@
-from aiogram import Dispatcher, types
+from typing import Union
+from aiogram import F, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -15,8 +16,9 @@ async def main_menu(message: types.Message, user: User):
     if user.is_admin:
         builder.button(text='Admin Panel', callback_data='admin_panel')
     builder.adjust(2)
-    
+
     await message.answer('Main Menu', reply_markup=builder.as_markup())
+
     bot_requests_logger.info('Main menu sent')
 
 def register_handlers_main_menu(dp: Dispatcher):
