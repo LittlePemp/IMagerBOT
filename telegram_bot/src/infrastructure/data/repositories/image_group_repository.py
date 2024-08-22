@@ -6,6 +6,7 @@ from settings import settings
 from src.models.image_group import ImageGroup, GroupStatus
 from src.infrastructure.services.imager_service.schemas import GroupInfo
 from src.utils.loggers import exception_logger
+from src.utils.building_blocks.result import Result
 
 
 class ImageGroupRepository:
@@ -53,9 +54,14 @@ class ImageGroupRepository:
                 {'$set': {'status': GroupStatus.INACTIVE, 'last_synced': datetime.now(settings.tzinfo)}}
             )
 
-    async def get_groups(self, status: GroupStatus = GroupStatus.ACTIVE) -> list[ImageGroup]:
-        groups_data = await self.collection.find({'status': status}).to_list(length=None)
-        return [ImageGroup(**group) for group in groups_data]
+    async def get_groups(self, status: GroupStatus = GroupStatus.ACTIVE) -> Result:
+        try:
+            groups_data = await self.collection.find({'status': status}).to_list(length=None)
+            groups = [ImageGroup(**group) for group in groups_data]
+            return Result.Success(groups)
+        except Exception as e:
+            exception_logger.error(f'Failed to get groups with status {status}: {e}')
+            return Result.Error(f'Failed to get groups: {e}')
 
     async def get_group_by_name(self, imager_name: str) -> ImageGroup:
         group_data = await self.collection.find_one({'imager_name': imager_name})
