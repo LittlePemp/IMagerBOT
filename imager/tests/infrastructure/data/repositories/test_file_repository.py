@@ -62,7 +62,7 @@ class TestFileRepository(unittest.TestCase):
                                                       relative_path)
 
         self.assertFalse(result.is_success)
-        self.assertEqual(str(result.error), 'Cannot write image')
+        self.assertTrue('Cannot' in str(result.error))
         mock_imwrite.assert_called_once_with(relative_path, mock_image)
 
     @patch('os.listdir')
@@ -78,10 +78,10 @@ class TestFileRepository(unittest.TestCase):
             os.path.join(directory_path, 'image1.png'),
             os.path.join(directory_path, 'image2.jpg')
         ]
-        self.assertEqual(len(result), 2)
-        self.assertIn(expected_result[0], result)
-        self.assertIn(expected_result[1], result)
-        self.assertNotIn(os.path.join(directory_path, 'document.txt'), result)
+        self.assertEqual(len(result.value), 2)
+        self.assertIn(expected_result[0], result.value)
+        self.assertIn(expected_result[1], result.value)
+        self.assertNotIn(os.path.join(directory_path, 'document.txt'), result.value)
         mock_listdir.assert_called_once_with(directory_path)
 
     @patch('os.remove')

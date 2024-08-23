@@ -37,6 +37,7 @@ class Mediator:
 
 mediator = Mediator()
 
+# TODO: DI?
 mediator.register(GenerateImageCommand,
                   GenerateImageCommandHandler())
 mediator.register(LoadImagesCommand,

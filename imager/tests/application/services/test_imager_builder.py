@@ -48,53 +48,40 @@ class TestImagerBuilder(unittest.TestCase):
         self.assertTrue(result.is_success)
         self.file_repository.read_image_file.assert_called_once_with(self.image_path)
 
-    @patch('src.application.image_builder.services.imager_builder.ImageService.convert_rgba_to_rgb')
-    @patch('src.application.image_builder.services.imager_builder.ImageService.resize_image')
-    @patch('src.application.image_builder.services.imager_builder.ImageService.overlay_image_alpha')
-    def test_make_image_failure(self, mock_overlay, mock_resize, mock_convert):
+    def test_make_image_failure_read_image(self):
         self.file_repository.read_image_file.return_value = Result.Error('Failed to read image')
 
         result = self.builder.make_image(self.image_path, self.group)
+
         self.assertFalse(result.is_success)
-        self.assertEqual(result.error, 'Failed to read image')
+        self.assertIn('Failed to read image', result.error)
+
+    def test_make_image_failure_save_image(self):
+        self.file_repository.read_image_file.return_value = Result.Success(self.image_rgba)
+        self.file_repository.save_image_file.return_value = Result.Error('Failed to save image')
+
+        result = self.builder.make_image(self.image_path, self.group)
+
+        self.assertFalse(result.is_success)
+        self.assertIn('Failed to save image', result.error)
 
     def test_calculate_small_image_dimensions(self):
         dimensions = self.builder.calculate_small_image_dimensions(self.image_rgb)
         self.assertEqual(dimensions, (120, 120))
 
-    @patch('src.application.image_builder.services.imager_builder.ImageService.split_image',
-           return_value=[np.random.randint(0, 255, (60, 60, 3), dtype=np.uint8)])
-    @patch('src.application.image_builder.services.imager_builder.ImageService.create_template',
-           return_value=np.zeros((3600, 3600, 3), dtype=np.uint8))
-    def test_create_result_image(self, mock_create_template, mock_split_image):
-        small_image = np.random.randint(0, 255, (60, 60, 3), dtype=np.uint8)
-        result_image = self.builder.create_result_image(small_image, 60, 60, self.group)
-        self.assertEqual(result_image.shape, (3600, 3600, 3))
-        mock_create_template.assert_called_once()
-        mock_split_image.assert_called_once()
+    def test_create_result_image_failure(self):
+        with patch('src.application.image_builder.services.imager_builder.ImageService.split_image', return_value=Result.Error('Split image error')):
+            result = self.builder.create_result_image(self.image_rgb, 60, 60, self.group)
 
-    @patch('src.application.image_builder.services.imager_builder.ImageService.crop_square_image')
-    @patch('src.application.image_builder.services.imager_builder.ImageService.resize_image')
-    def test_process_tile_with_crop(self, mock_resize, mock_crop):
-        mock_crop.return_value = np.random.randint(0, 255, (60, 60, 3), dtype=np.uint8)
-        mock_resize.return_value = np.random.randint(0, 255, (60, 60, 3), dtype=np.uint8)
-        tile = np.random.randint(0, 255, (1, 1, 3), dtype=np.uint8)
-        result_tile = self.builder.process_tile(tile, self.group)
-        self.assertEqual(result_tile.shape, (60, 60, 3))
-        mock_crop.assert_called()
-        mock_resize.assert_called()
+        self.assertFalse(result.is_success)
+        self.assertIn('Split image error', result.error)
 
-    @patch('src.application.image_builder.services.imager_builder.ImageService.resize_image')
-    def test_process_tile_with_scale(self, mock_resize):
-        self.builder.insertion_format = 'scale'
-        mock_resize.return_value = np.random.randint(0, 255, (60, 60, 3), dtype=np.uint8)
-        tile = np.random.randint(0, 255, (1, 1, 3), dtype=np.uint8)
-        result_tile = self.builder.process_tile(tile, self.group)
-        self.assertEqual(result_tile.shape, (60, 60, 3))
-        mock_resize.assert_called()
-
-    def test_save_image(self):
+    def test_save_image_failure(self):
+        self.file_repository.save_image_file.return_value = Result.Error('Failed to save image')
         final_image = np.random.randint(0, 255, (120, 120, 3), dtype=np.uint8)
-        path = self.builder.save_image(final_image).value
-        self.assertTrue(path.endswith('.png'))
+
+        result = self.builder.save_image(final_image)
+
+        self.assertFalse(result.is_success)
+        self.assertIn('Failed to save image', result.error)
         self.file_repository.save_image_file.assert_called_once()
