@@ -45,23 +45,31 @@ class ImagerBuilder:
             image = image_result.value
 
             if image.shape[2] == 4:
-                image = ImageService.convert_rgba_to_rgb(image)
+                convert_result = ImageService.convert_rgba_to_rgb(image)
+                if not convert_result.is_success:
+                    return Result.Error(convert_result.error)
+                image = convert_result.value
 
-            small_width, small_height = self.calculate_small_image_dimensions(
-                image)
-            small_image = ImageService.resize_image(image, small_width,
-                                                    small_height)
-            result_image = self.create_result_image(small_image,
-                                                    small_width,
-                                                    small_height,
-                                                    group)
-            final_image = ImageService.overlay_image_alpha(result_image,
-                                                           image,
-                                                           self.alpha)
+            small_width, small_height = self.calculate_small_image_dimensions(image)
+            resize_result = ImageService.resize_image(image, small_width, small_height)
+            if not resize_result.is_success:
+                return Result.Error(resize_result.error)
+            small_image = resize_result.value
+
+            result_image_result = self.create_result_image(small_image, small_width, small_height, group)
+            if not result_image_result.is_success:
+                return Result.Error(result_image_result.error)
+            result_image = result_image_result.value
+
+            overlay_result = ImageService.overlay_image_alpha(result_image, image, self.alpha)
+            if not overlay_result.is_success:
+                return Result.Error(overlay_result.error)
+            final_image = overlay_result.value
 
             final_image_path_result = self.save_image(final_image)
             if final_image_path_result.is_success:
                 return Result.Success(final_image_path_result.value)
+            return Result.Error(final_image_path_result.error)
         except Exception as err:
             return ServicesErrorMessages.error_in_make_image(err)
 
@@ -76,21 +84,37 @@ class ImagerBuilder:
         return dimensions
 
     def create_result_image(self, small_image: np.ndarray, small_width: int,
-                            small_height: int, group: str) -> np.ndarray:
-        # TODO: if need sharding
-        tiles = ImageService.split_image(small_image, 1, 1)
-        result_image = ImageService.create_template(
-            small_width * self.cell_size, small_height * self.cell_size)
+                            small_height: int, group: str) -> Result:
+        tiles_result = ImageService.split_image(small_image, 1, 1)
+        if not tiles_result.is_success:
+            return Result.Error(tiles_result.error)
+
+        tiles = tiles_result.value
+        template_result = ImageService.create_template(small_width * self.cell_size, small_height * self.cell_size)
+        if not template_result.is_success:
+            return Result.Error(template_result.error)
+
+        result_image = template_result.value
+
         for i, tile in enumerate(tiles):
             tile_x = (i // 1) * (small_height // 1) * self.cell_size
             tile_y = (i % 1) * (small_width // 1) * self.cell_size
-            result_tile = self.process_tile(tile, group)
-            result_image[
-                tile_x:tile_x + result_tile.shape[0],
-                tile_y:tile_y + result_tile.shape[1]] = result_tile
-        return result_image
+            result_tile_result = self.process_tile(tile, group)
+            if not result_tile_result.is_success:
+                return Result.Error(result_tile_result.error)
 
-    def process_tile(self, tile: np.ndarray, group: str) -> np.ndarray:
+            result_tile = result_tile_result.value
+            try:
+                result_image[
+                    tile_x:tile_x + result_tile.shape[0],
+                    tile_y:tile_y + result_tile.shape[1]
+                ] = result_tile
+            except ValueError as e:
+                return Result.Error(f"Error placing tile in result image: {str(e)}")
+
+        return Result.Success(result_image)
+
+    def process_tile(self, tile: np.ndarray, group: str) -> Result:
         tile_height, tile_width, num_channels = tile.shape
         result_tile = np.zeros(
             (tile_height * self.cell_size,
@@ -117,31 +141,37 @@ class ImagerBuilder:
                     noised_rgb,
                     group)
                 if closest_cell is None:
-                    ServicesErrorMessages.no_closest_cell_found(
+                    return Result.Error(ServicesErrorMessages.no_closest_cell_found(
                         noised_rgb,
-                        group)
-                    continue
+                        group))
                 cell_image = closest_cell.image
                 if cell_image is None:
-                    ServicesErrorMessages.cell_image_is_none(
+                    return Result.Error(ServicesErrorMessages.cell_image_is_none(
                         noised_rgb,
-                        group)
-                    continue
+                        group))
 
                 if self.insertion_format == 'crop':
-                    cell_image = ImageService.crop_square_image(cell_image)
-                cell_image = ImageService.resize_image(
+                    crop_result = ImageService.crop_square_image(cell_image)
+                    if not crop_result.is_success:
+                        return Result.Error(crop_result.error)
+                    cell_image = crop_result.value
+
+                resize_result = ImageService.resize_image(
                     cell_image,
                     self.cell_size,
                     self.cell_size)
+                if not resize_result.is_success:
+                    return Result.Error(resize_result.error)
+                cell_image = resize_result.value
 
                 y_big = y * self.cell_size
                 x_big = x * self.cell_size
                 result_tile[y_big: y_big + self.cell_size,
                             x_big: x_big + self.cell_size] = cell_image
-        return result_tile
 
-    def save_image(self, final_image: np.ndarray) -> str:
+        return Result.Success(result_tile)
+
+    def save_image(self, final_image: np.ndarray) -> Result:
         final_image_name = f'IMager_{uuid4()}.png'
         final_image_path = os.path.join(settings.file_path_prefix + settings.generated_images_path,
                                         final_image_name)

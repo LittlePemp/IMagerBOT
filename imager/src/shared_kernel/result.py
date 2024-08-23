@@ -17,3 +17,6 @@ class Result:
             return f'<Success: {self.value}>'
         else:
             return f'<Error: {self.error}>'
+
+    def __bool__(self):
+        return self.is_success
