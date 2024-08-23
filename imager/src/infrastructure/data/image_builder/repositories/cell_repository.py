@@ -64,6 +64,7 @@ class CellRepository(IRepository):
         return cell_objects[idx] if idx < len(cell_objects) else None
 
     def load_missing_groups(self) -> Result:
+        # TODO: TRY EXCEPT
         base_path = self.file_repository.settings.image_groups_relative_path
         all_groups = set(os.listdir(base_path))
         existing_groups = set(self.get_all_groups())

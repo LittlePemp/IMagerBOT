@@ -16,35 +16,32 @@ class ValidateImagesDataCommand(ICommand):
 
 class ValidateImagesDataCommandHandler(ICommandHandler):
     def handle(self, command: ValidateImagesDataCommand) -> Result:
-        uow = get_uow()
         try:
-            file_repository = uow.file_repository
-            cell_repository = uow.cell_repository
+            with get_uow() as uow:
+                file_repository = uow.file_repository
+                cell_repository = uow.cell_repository
 
-            directory = os.path.join(
-                settings.image_groups_relative_path,
-                command.group_name
-            )
+                image_files = self._get_image_files(file_repository, command.group_name)
+                db_image_files = self._get_db_image_files(cell_repository)
 
-            image_files = set(file_repository.list_image_files(directory))
+                missing_in_db = image_files - db_image_files
+                if missing_in_db:
+                    return CommandsErrorMessages.images_missing_in_database(missing_in_db)
 
-            db_image_files = set(
-                cell.relative_file_path
-                for cell
-                in cell_repository.mongo_repository.filter()
-            )
+                missing_on_disk = db_image_files - image_files
+                if missing_on_disk:
+                    return CommandsErrorMessages.images_missing_on_disk(missing_on_disk)
 
-            missing_in_db = image_files - db_image_files
-            if missing_in_db:
-                return CommandsErrorMessages.images_missing_in_database(
-                    missing_in_db)
-
-            missing_on_disk = db_image_files - image_files
-            if missing_on_disk:
-                return CommandsErrorMessages.images_missing_on_disk(
-                    missing_on_disk)
-
-            return Result.Success(f'All images in {command.group_name} are '
-                                  'validated successfully')
+                return Result.Success(f'All images in {command.group_name} are validated successfully')
         except Exception as e:
             return CommandsErrorMessages.general_error(e)
+
+    def _get_image_files(self, file_repository, group_name: str) -> set:
+        directory = os.path.join(settings.image_groups_relative_path, group_name)
+        return set(file_repository.list_image_files(directory))
+
+    def _get_db_image_files(self, cell_repository) -> set:
+        return set(
+            cell.relative_file_path
+            for cell in cell_repository.mongo_repository.filter()
+        )
