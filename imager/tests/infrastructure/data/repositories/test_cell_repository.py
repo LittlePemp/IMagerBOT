@@ -6,32 +6,33 @@ from src.domain.image_builder.aggregates.cell import Cell
 from src.domain.image_builder.entities.cell_object import CellObject
 from src.domain.image_builder.value_objects.cell_rgb import (CellRgb,
                                                              ColorDefinition)
-from src.infrastructure.data.image_builder.models.cell_model import CellModel
 from src.infrastructure.data.image_builder.repositories.cell_repository import \
     CellRepository
 from src.shared_kernel.result import Result
 
 
 class TestCellRepository(unittest.TestCase):
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.MongoRepository')
     @patch('src.infrastructure.data.image_builder.repositories.cell_repository.FileRepository')
-    def setUp(self, mock_mongo_repo, mock_file_repo):
+    @patch('pymongo.collection.Collection')
+    def setUp(self, mock_mongo_collection, mock_file_repo):
         self.mock_file_repo = mock_file_repo
-        self.mock_mongo_repo = mock_mongo_repo
+        self.mock_mongo_collection = mock_mongo_collection
         if CellRepository._instance:
             CellRepository._instance = None
-        self.cell_repository = CellRepository(mock_mongo_repo, mock_file_repo)
+        self.cell_repository = CellRepository(mock_mongo_collection, mock_file_repo)
 
     def test_initialization(self):
         self.assertFalse(self.cell_repository._initialized)
-        self.assertIsInstance(self.cell_repository.mongo_repository, MagicMock)
+        self.assertIsInstance(self.cell_repository.mongo_collection, MagicMock)
         self.assertIsInstance(self.cell_repository.file_repository, MagicMock)
         self.assertIsInstance(self.cell_repository._data, defaultdict)
         self.assertEqual(self.cell_repository._trees, {})
 
     @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository.load_data_from_mongo')
     @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository.load_images')
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository._CellRepository__build_trees')
+    @patch(
+        'src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository._CellRepository__build_trees'
+    )
     def test_initialize(self, mock_build_trees,
                         mock_load_images,
                         mock_load_data_from_mongo):
@@ -51,18 +52,14 @@ class TestCellRepository(unittest.TestCase):
         mock_cell_object_create.side_effect = lambda cell: Result.Success(
             CellObject(cell, None))
 
-        self.mock_mongo_repo.filter.return_value = [
-            CellModel(r=255, g=0, b=0,
-                      group='group1', relative_file_path='path1'),
-            CellModel(r=0, g=255, b=0,
-                      group='group1', relative_file_path='path2')
+        self.mock_mongo_collection.find.return_value = [
+            {'r': 255, 'g': 0, 'b': 0, 'group': 'group1', 'relative_file_path': 'path1'},
+            {'r': 0, 'g': 255, 'b': 0, 'group': 'group1', 'relative_file_path': 'path2'}
         ]
 
         self.cell_repository.get_all_groups = MagicMock(return_value=['group1'])
 
         self.cell_repository.load_data_from_mongo()
-
-        print(f"Data loaded: {self.cell_repository._data}")
 
         self.assertIn('group1', self.cell_repository._data)
         self.assertEqual(len(self.cell_repository._data['group1']), 2)
@@ -77,11 +74,9 @@ class TestCellRepository(unittest.TestCase):
                     ColorDefinition(0)),
                 'group1', 'path1'), None)
         self.cell_repository._data = {'group1': {'path1': cell_obj}}
-        self.mock_file_repo.read_image_file.return_value = Result.Success(
-            'image_data')
+        self.mock_file_repo.read_image_file.return_value = Result.Success('image_data')
         self.cell_repository.load_images()
-        self.assertEqual(self.cell_repository._data['group1']['path1'].image,
-                         'image_data')
+        self.assertEqual(self.cell_repository._data['group1']['path1'].image, 'image_data')
 
     @patch('src.domain.image_builder.services.kdtree_service.KDTreeService.find_closest')
     def test_find_closest_cell(self, mock_find_closest):
@@ -113,7 +108,7 @@ class TestCellRepository(unittest.TestCase):
                 Cell(
                     rgb, group, path), 'image_data'))
 
-        self.cell_repository.mongo_repository.save = MagicMock()
+        self.cell_repository.mongo_collection.insert_one = MagicMock()
 
         result = self.cell_repository.load_missing_groups()
 
@@ -122,9 +117,8 @@ class TestCellRepository(unittest.TestCase):
 
     def test_get_all_groups(self):
         mock_collection = MagicMock()
-        mock_collection.aggregate.return_value = [{'_id': 'group1'},
-                                                  {'_id': 'group2'}]
-        self.mock_mongo_repo._collection = mock_collection
+        mock_collection.aggregate.return_value = [{'_id': 'group1'}, {'_id': 'group2'}]
+        self.cell_repository.mongo_collection = mock_collection
 
         result = self.cell_repository.get_all_groups()
 
