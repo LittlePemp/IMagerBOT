@@ -26,7 +26,6 @@ class TestGenerateImageCommandHandler(unittest.TestCase):
         mock_uow = MagicMock(spec=MongoUnitOfWork)
         mock_uow.file_repository = MagicMock()
         mock_uow.cell_repository = MagicMock()
-        mock_uow.file_repository.read_image_file.return_value = Result.Success('image_data')
         mock_get_uow.return_value = mock_uow
 
         mock_builder = MagicMock()
