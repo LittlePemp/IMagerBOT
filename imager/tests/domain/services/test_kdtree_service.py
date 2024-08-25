@@ -33,7 +33,7 @@ class TestKDTreeService(unittest.TestCase):
         }
 
     def test_build_trees(self):
-        trees = KDTreeService.build_trees(self.data)
+        trees = KDTreeService.build_trees(self.data).value
         self.assertIn('group1', trees)
         tree, cell_objects = trees['group1']
         self.assertIsInstance(tree, KDTree)
@@ -42,18 +42,18 @@ class TestKDTreeService(unittest.TestCase):
         self.assertIn(self.cell_object2, cell_objects)
 
     def test_find_closest(self):
-        trees = KDTreeService.build_trees(self.data)
+        trees = KDTreeService.build_trees(self.data).value
         tree, cell_objects = trees['group1']
 
         target_rgb = (100, 150, 200)
-        distance, index = KDTreeService.find_closest(tree, target_rgb)
+        _, index = KDTreeService.find_closest(tree, target_rgb).value
         closest_cell = cell_objects[index]
         self.assertEqual(closest_cell.cell.rgb.r.value, 100)
         self.assertEqual(closest_cell.cell.rgb.g.value, 150)
         self.assertEqual(closest_cell.cell.rgb.b.value, 200)
 
         target_rgb = (50, 75, 100)
-        distance, index = KDTreeService.find_closest(tree, target_rgb)
+        distance, index = KDTreeService.find_closest(tree, target_rgb).value
         closest_cell = cell_objects[index]
         self.assertEqual(closest_cell.cell.rgb.r.value, 50)
         self.assertEqual(closest_cell.cell.rgb.g.value, 75)

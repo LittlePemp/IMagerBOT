@@ -60,7 +60,9 @@ class CellRepository(IRepository):
         tree, cell_objects = self._trees.get(group_name, (None, None))
         if tree is None:
             return None
-        _, idx = KDTreeService.find_closest(tree, pixel_rgb)
+        closest_result = KDTreeService.find_closest(tree, pixel_rgb)
+        if closest_result:
+            _, idx = closest_result.value
         return cell_objects[idx] if idx < len(cell_objects) else None
 
     def load_missing_groups(self) -> Result:
@@ -120,7 +122,7 @@ class CellRepository(IRepository):
         return results
 
     def __build_trees(self):
-        self._trees = KDTreeService.build_trees(self._data)
+        self._trees = KDTreeService.build_trees(self._data).value
 
     @property
     def data(self):
