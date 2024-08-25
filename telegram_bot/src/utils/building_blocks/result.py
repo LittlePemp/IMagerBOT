@@ -1,8 +1,14 @@
+from src.utils.loggers import exception_logger
+
+
 class Result:
     def __init__(self, value=None, error=None):
         self.value = value
         self.error = error
         self.is_success = error is None
+
+        if not self.is_success:
+            exception_logger.error(f'Error: {self.error}')
 
     @classmethod
     def Success(cls, value):
@@ -17,3 +23,6 @@ class Result:
             return f'<Success: {self.value}>'
         else:
             return f'<Error: {self.error}>'
+
+    def __bool__(self):
+        return self.is_success
