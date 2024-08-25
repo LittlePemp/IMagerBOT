@@ -2,11 +2,11 @@ from datetime import datetime
 
 from aiogram import BaseMiddleware
 from aiogram.types import Message
-from src.utils.loggers import exception_logger
 from settings import settings
-from src.models.user import User, UserStatus
 from src.infrastructure.data.repositories.user_repository import UserRepository
-from src.utils.loggers import bot_requests_logger
+from src.models.user import User, UserStatus
+from src.utils.building_blocks.result import Result
+from src.utils.loggers import bot_requests_logger, exception_logger
 
 
 class AuthenticationMiddleware(BaseMiddleware):
@@ -21,30 +21,20 @@ class AuthenticationMiddleware(BaseMiddleware):
 
         user = await self.user_repository.get_user_by_id(user_id)
         if user is None:
-            user_data = {
-                'telegram_username': username,
-                'telegram_id': user_id,
-                'name': full_name,
-                'registered_datetime_utc': datetime.now(settings.tzinfo),
-                'last_activity_datetime_utc': datetime.now(settings.tzinfo),
-                'isbanned': False,
-                'status': UserStatus.USER
-            }
-            user_result = User.create(**user_data)
-            if user_result.is_success:
-                user = user_result.value
-                success = await self.user_repository.add_user(user)
-                if success:
-                    bot_requests_logger.info(f'New user added: {user.telegram_id}')
-                    user = await self.user_repository.get_user_by_id(user_id)
-                else:
-                    exception_logger.error(f'Failed to add new user: {user.telegram_id}')
-                    return
-            else:
-                exception_logger.error(f'Failed to create user: {user_result.error}')
+            user_result = self._create_new_user(user_id, username, full_name)
+            if not user_result:
                 return
+
+            user = user_result.value
+            add_result = await self.user_repository.add_user(user)
+            if not add_result:
+                exception_logger.error(f'Failed to add new user: {user.telegram_id}')
+                return
+
+            bot_requests_logger.info(f'New user added: {user.telegram_id}')
+            user = await self.user_repository.get_user_by_id(user_id)
         else:
-            await self.user_repository.update_user_info(user_id, username, full_name)
+            await self._update_user_info(user_id, username, full_name)
 
         if user.isbanned:
             exception_logger.warning(f'Blocked user attempted access: {user.telegram_id}')
@@ -54,3 +44,25 @@ class AuthenticationMiddleware(BaseMiddleware):
         bot_requests_logger.info(f'Authenticated user: {user.telegram_id}')
         data['user'] = user
         return await handler(event, data)
+
+    def _create_new_user(self, user_id: int, username: str, full_name: str) -> Result:
+        user_data = {
+            'telegram_username': username,
+            'telegram_id': user_id,
+            'name': full_name,
+            'registered_datetime_utc': datetime.now(settings.tzinfo),
+            'last_activity_datetime_utc': datetime.now(settings.tzinfo),
+            'isbanned': False,
+            'status': UserStatus.USER
+        }
+        user_result = User.create(**user_data)
+        if not user_result:
+            exception_logger.error(f'Failed to create user: {user_result.error}')
+        return user_result
+
+    async def _update_user_info(self, user_id: int, username: str, full_name: str):
+        update_result = await self.user_repository.update_user_info(user_id, username, full_name)
+        if update_result:
+            bot_requests_logger.info(f'Updated user info: {user_id}')
+        else:
+            exception_logger.error(f'Failed to update user info: {user_id}')
