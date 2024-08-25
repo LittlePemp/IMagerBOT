@@ -81,9 +81,13 @@ class TestCellRepository(unittest.TestCase):
     @patch('src.domain.image_builder.services.kdtree_service.KDTreeService.find_closest')
     def test_find_closest_cell(self, mock_find_closest):
         tree = MagicMock()
-        cell_obj = MagicMock()
+        cell_rgb = CellRgb(255, 0, 0)
+        cell_obj = Cell.create(cell_rgb, 'group1', 'path/to/file').value
+
         self.cell_repository._trees = {'group1': (tree, [cell_obj])}
-        mock_find_closest.return_value = (0, 0)
+
+        mock_find_closest.return_value = Result.Success((0, 0))
+
         result = self.cell_repository.find_closest_cell((255, 0, 0), 'group1')
         self.assertEqual(result, cell_obj)
 

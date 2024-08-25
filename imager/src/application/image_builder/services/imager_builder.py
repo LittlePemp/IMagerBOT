@@ -7,7 +7,6 @@ from settings import settings
 from src.application.image_builder.errors.services_errors import \
     ServicesErrorMessages
 from src.domain.image_builder.services.image_service import ImageService
-from src.domain.image_builder.services.kdtree_service import KDTreeService
 from src.infrastructure.data.image_builder.repositories.cell_repository import \
     CellRepository  # noqa
 from src.infrastructure.data.image_builder.repositories.file_repository import \
@@ -33,9 +32,6 @@ class ImagerBuilder:
         self.cell_size = cell_size
         self.alpha = alpha
         self.noise_degree = noise_degree
-        self.kdtree_service = KDTreeService()
-        self.kdtree_service.trees = self.kdtree_service.build_trees(
-            cell_repository.data)
 
     def make_image(self, image_path: str, group: str) -> Result:
         try:
