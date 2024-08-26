@@ -9,7 +9,19 @@ class LoggingMiddleware(BaseMiddleware):
         self.logger = logger
 
     async def __call__(self, handler, event, data):
-        user_id = getattr(event.from_user, 'id', 'unknown_user')
+        print(event, dir(event))
+        user_id = 'unknown_user'
+        if hasattr(event, 'message') and event.message:
+            user_id = event.message.from_user.id
+        elif hasattr(event, 'callback_query') and event.callback_query:
+            user_id = event.callback_query.from_user.id
+        elif hasattr(event, 'inline_query') and event.inline_query:
+            user_id = event.inline_query.from_user.id
+        elif hasattr(event, 'chat_member') and event.chat_member:
+            user_id = event.chat_member.from_user.id
+        elif hasattr(event, 'my_chat_member') and event.my_chat_member:
+            user_id = event.my_chat_member.from_user.id
+
         event_type = type(event).__name__
 
         self.logger.info(
