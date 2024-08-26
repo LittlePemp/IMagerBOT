@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 from settings import settings
-from src.commands.main_menu import main_menu
+from src.commands.main_menu import MainMenuHandler
 from src.infrastructure.data.unit_of_work import MongoUnitOfWork
 from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.schemas import \
@@ -141,7 +141,7 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
     await state.clear()
     bot_requests_logger.info('FSM state cleared after image generation.')
 
-    await main_menu(message, user)
+    await MainMenuHandler.main_menu(message, user)
 
 async def back_to_previous(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
     current_state = await state.get_state()
