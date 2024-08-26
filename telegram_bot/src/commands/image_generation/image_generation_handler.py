@@ -1,18 +1,24 @@
 from functools import partial
-from aiogram import F, Dispatcher
+
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message, FSInputFile
 from aiogram.fsm.context import FSMContext
-from src.infrastructure.services.imager_service import imager_service
-from src.infrastructure.data.unit_of_work import MongoUnitOfWork
-from src.models.image_build_params import ParamType
-from src.utils.loggers import bot_requests_logger, exception_logger
+from aiogram.types import CallbackQuery, FSInputFile, Message
 from settings import settings
-from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
 from src.commands.main_menu import main_menu
+from src.infrastructure.data.unit_of_work import MongoUnitOfWork
+from src.infrastructure.services.imager_service import imager_service
+from src.infrastructure.services.imager_service.schemas import \
+    GenerateImageRequest
+from src.models.image_build_params import ParamType
 from src.models.user import User
+from src.utils.loggers import bot_requests_logger, exception_logger
+
+from .image_generation_keyboards import (image_group_keyboard,
+                                         image_size_keyboard,
+                                         inset_size_keyboard,
+                                         noise_level_keyboard)
 from .image_generation_states import ImageGenerationStates
-from .image_generation_keyboards import image_size_keyboard, noise_level_keyboard, inset_size_keyboard, image_group_keyboard
 
 
 async def start_image_generation(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
@@ -46,7 +52,7 @@ async def select_image_size(callback: CallbackQuery, state: FSMContext, uow: Mon
 async def select_noise_level(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
     noise_name = callback.data.split('_')[2]
     await state.update_data(noise_level=noise_name)
-    
+
     insets_result = await uow.image_build_params_repository.get_common_params(ParamType.INSET_SIZE)
     if insets_result.is_success:
         insets = insets_result.value
@@ -64,7 +70,8 @@ async def select_inset_size(callback: CallbackQuery, state: FSMContext, uow: Mon
     groups_result = await uow.image_group_repository.get_groups()
     if groups_result.is_success:
         groups = groups_result.value
-        await callback.message.edit_text('Выберите группу изображений:', reply_markup=image_group_keyboard(groups).as_markup())
+        await callback.message.edit_text('Выберите группу изображений:',
+                                         reply_markup=image_group_keyboard(groups).as_markup())
         await state.set_state(ImageGenerationStates.selecting_image_group)
     else:
         await callback.message.edit_text('Ошибка получения групп изображений.')
@@ -80,10 +87,12 @@ async def select_image_group(callback: CallbackQuery, state: FSMContext, uow: Mo
 
 
 async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWork, user: User):
+    # Check image
     if not message.photo:
         await message.answer('Пожалуйста, загрузите изображение.')
         return
 
+    # try to load image
     try:
         photo = message.photo[-1]
         file = await message.bot.get_file(photo.file_id)
@@ -95,6 +104,7 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
         await message.answer('Внутренняя ошибка: не удалось загрузить изображение. Пожалуйста, попробуйте еще раз.')
         return
 
+    # Image generation
     try:
         data = await state.get_data()
         generate_image_request = GenerateImageRequest(
@@ -106,22 +116,32 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
             cell_size=int(float(data['inset_size'])),
             result_size=int(float(data['image_size'])),
         )
-        imager_response = await imager_service.generate_image(generate_image_request)
+
+        # Handle image generation
+        imager_response_result = await imager_service.generate_image(generate_image_request)
+        if not imager_response_result:
+            exception_logger.error(f'Ошибка при генерации изображения: {imager_response_result.error}')
+            await message.answer(
+                'Внутренняя ошибка: не удалось сгенерировать изображение. Пожалуйста, попробуйте еще раз.')
+            return
+
+        # Image generation path
+        imager_response = imager_response_result.value
         generated_image_path = f'{settings.generated_images_path}/{imager_response.path}'
 
+        # Send image
         input_file = FSInputFile(generated_image_path)
         await message.answer_document(document=input_file, caption='Ваше изображение готово!')
-
     except Exception as e:
         exception_logger.error(f'Ошибка при генерации изображения: {e}')
         await message.answer('Внутренняя ошибка: не удалось сгенерировать изображение. Пожалуйста, попробуйте еще раз.')
         return
 
+    # FSM clear
     await state.clear()
     bot_requests_logger.info('FSM state cleared after image generation.')
 
     await main_menu(message, user)
-
 
 async def back_to_previous(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
     current_state = await state.get_state()
@@ -130,7 +150,8 @@ async def back_to_previous(callback: CallbackQuery, state: FSMContext, uow: Mong
     if current_state == ImageGenerationStates.selecting_noise_level:
         sizes_result = await uow.image_build_params_repository.get_common_params(ParamType.IMAGE_SIZE)
         sizes = sizes_result.value
-        await callback.message.edit_text('Выберите размер изображения:', reply_markup=image_size_keyboard(sizes).as_markup())
+        await callback.message.edit_text('Выберите размер изображения:',
+                                         reply_markup=image_size_keyboard(sizes).as_markup())
         await state.set_state(ImageGenerationStates.selecting_image_size)
 
     elif current_state == ImageGenerationStates.selecting_inset_size:
@@ -148,7 +169,8 @@ async def back_to_previous(callback: CallbackQuery, state: FSMContext, uow: Mong
     elif current_state == ImageGenerationStates.waiting_for_image_upload:
         groups_result = await uow.image_group_repository.get_groups()
         groups = groups_result.value
-        await callback.message.edit_text('Выберите группу изображений:', reply_markup=image_group_keyboard(groups).as_markup())
+        await callback.message.edit_text('Выберите группу изображений:',
+                                         reply_markup=image_group_keyboard(groups).as_markup())
         await state.set_state(ImageGenerationStates.selecting_image_group)
 
     await callback.answer()

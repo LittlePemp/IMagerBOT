@@ -1,17 +1,38 @@
 from functools import partial
-from aiogram import types, Dispatcher
-from aiogram.types import CallbackQuery
+
+from aiogram import Dispatcher, types
 from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery
 from src.infrastructure.data.unit_of_work import MongoUnitOfWork
 from src.infrastructure.services.imager_service import imager_service
 from src.models.image_group import GroupStatus
-from .image_groups_keyboard import image_groups_keyboard, group_action_keyboard, back_to_image_groups_keyboard
+from src.utils.loggers import exception_logger
+
+from .image_groups_keyboard import (back_to_image_groups_keyboard,
+                                    group_action_keyboard,
+                                    image_groups_keyboard)
 from .image_groups_states import ImageGroupsStates
+
 
 async def show_image_groups_menu(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
     await state.clear()
-    groups_response = await imager_service.list_groups()
-    await uow.image_group_repository.sync_groups(groups_response.groups)
+
+    groups_response_result = await imager_service.list_groups()
+    if not groups_response_result:
+        exception_logger.error(f'Failed to retrieve image groups: {groups_response_result.error}')
+        await callback.message.edit_text('Ошибка при получении списка групп.')
+        await callback.answer()
+        return
+
+    groups_response = groups_response_result.value
+
+    sync_result = await uow.image_group_repository.sync_groups(groups_response.groups)
+    if not sync_result:
+        exception_logger.error(f'Failed to sync image groups: {sync_result.error}')
+        await callback.message.edit_text('Ошибка при синхронизации групп.')
+        await callback.answer()
+        return
+
     active_groups = await uow.image_group_repository.get_groups()
 
     if not active_groups:
@@ -28,17 +49,20 @@ async def show_image_groups_menu(callback: CallbackQuery, state: FSMContext, uow
 
 async def show_group_details(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
     group_name = callback.data.split('/')[1]
-    group = await uow.image_group_repository.get_group_by_name(group_name)
 
-    if not group:
+    group_result = await uow.image_group_repository.get_group_by_name(group_name)
+    if not group_result:
+        exception_logger.error(f'Failed to retrieve group "{group_name}": {group_result.error}')
         await callback.message.edit_text(f'Группа \'{group_name}\' не найдена.')
         await callback.answer()
         return
 
+    group = group_result.value
+
     group_info = (
         f'Группа: {group.display_name}\n'
         f'Количество изображений: {group.count}\n'
-        f'Статус: {"Активна" if group.status == GroupStatus.ACTIVE else "Неактивна"}'
+        f'Статус: {'Активна' if group.status == GroupStatus.ACTIVE else 'Неактивна'}'
     )
 
     await callback.message.edit_text(group_info, reply_markup=group_action_keyboard(group))

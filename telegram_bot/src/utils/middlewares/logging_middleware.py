@@ -9,7 +9,6 @@ class LoggingMiddleware(BaseMiddleware):
         self.logger = logger
 
     async def __call__(self, handler, event, data):
-        print(event, dir(event))
         user_id = 'unknown_user'
         if hasattr(event, 'message') and event.message:
             user_id = event.message.from_user.id
