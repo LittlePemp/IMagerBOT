@@ -6,6 +6,8 @@ from src.utils.loggers import bot_requests_logger
 
 from .admin_panel_keyboard import admin_panel_keyboard
 from .admin_panel_states import AdminPanelStates
+from .user_management.user_management_handler import \
+    register_handlers_user_management
 
 
 async def admin_panel(message: types.Message):
@@ -35,6 +37,6 @@ async def admin_panel_callback(callback_query: types.CallbackQuery, state: FSMCo
         await callback_query.answer()
 
 def register_handlers_admin_panel(dp: Dispatcher):
-    ''' Registers admin panel handlers. '''
+    register_handlers_user_management(dp)
     dp.message.register(admin_panel, Command('admin'), AdminFilter())
     dp.callback_query.register(admin_panel_callback, F.data.startswith('admin_panel'), AdminFilter())

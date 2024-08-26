@@ -83,7 +83,7 @@ async def toggle_group_status(callback: CallbackQuery, state: FSMContext, uow: M
     await uow.image_group_repository.update_group_status(group_name, new_status)
     await show_group_details(callback, state, uow)
 
-async def rename_group(callback: CallbackQuery, state: FSMContext):
+async def rename_group_handler(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text('Введите новое название для группы:', reply_markup=back_to_image_groups_keyboard())
     await state.set_state(ImageGroupsStates.renaming_group)
     await callback.answer()
@@ -102,5 +102,5 @@ def register_handlers_image_groups(dp: Dispatcher, uow: MongoUnitOfWork):
     dp.callback_query.register(partial(show_image_groups_menu, uow=uow), lambda c: c.data == 'admin_panel:image_groups')
     dp.callback_query.register(partial(show_group_details, uow=uow), lambda c: c.data.startswith('group/'))
     dp.callback_query.register(partial(toggle_group_status, uow=uow), lambda c: c.data.startswith('toggle_status/'))
-    dp.callback_query.register(rename_group, lambda c: c.data.startswith('rename/'))
+    dp.callback_query.register(rename_group_handler, lambda c: c.data.startswith('rename/'))
     dp.message.register(partial(receive_new_group_name, uow=uow), ImageGroupsStates.renaming_group)

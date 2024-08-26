@@ -1,6 +1,7 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def user_action_keyboard(isbanned, is_admin):
+
+def user_action_keyboard(isbanned: bool, is_admin: bool):
     builder = InlineKeyboardBuilder()
     if isbanned:
         builder.button(text='Разблокировать пользователя', callback_data='user_action:unblock_user')

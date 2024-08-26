@@ -1,45 +1,72 @@
-from aiogram import Dispatcher, types, F
-from aiogram.types import CallbackQuery, Message
+from aiogram import Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from src.commands.admin_panel.user_management.user_management_keyboard import \
+    user_action_keyboard
+from src.commands.admin_panel.user_management.user_management_states import \
+    UserManagementStates
 from src.infrastructure.data.repositories.user_repository import UserRepository
-from src.utils.loggers import bot_requests_logger
-from src.commands.admin_panel.user_management.user_management_states import UserManagementStates
-from src.commands.admin_panel.user_management.user_management_keyboard import user_action_keyboard
 from src.models.user import User, UserStatus
+from src.utils.loggers import bot_requests_logger
 
 
 async def user_management(callback: CallbackQuery, state: FSMContext):
-    user_repository: UserRepository = callback.bot.user_repository
-    user_count = await user_repository.get_user_count()
-    await callback.message.edit_text(f'Общее количество пользователей: {user_count}\nПожалуйста, введите username или ID пользователя:')
-    await state.set_state(UserManagementStates.waiting_for_username_or_id)
-    await callback.answer()
+    ''' Handles the user management option in the admin panel. '''
+    try:
+        user_repository: UserRepository = callback.bot.user_repository
+        user_count = await user_repository.get_user_count()
+        await callback.message.edit_text(
+            f'Общее количество пользователей: {user_count}\nПожалуйста, введите username или ID пользователя:')
+        await state.set_state(UserManagementStates.waiting_for_username_or_id)
+        await callback.answer()
+    except Exception as e:
+        bot_requests_logger.error(f'Error in user_management: {e}')
+        await callback.message.answer('Ошибка при открытии управления пользователями.')
+        await callback.answer()
 
 async def receive_username_or_id(message: Message, state: FSMContext):
-    user_repository: UserRepository = message.bot.user_repository
-    user_input = message.text
+    ''' Handles the input of username or ID for user management. '''
+    try:
+        user_repository: UserRepository = message.bot.user_repository
+        user_input = message.text
 
-    user = await fetch_user(user_input, user_repository)
+        user = await fetch_user(user_input, user_repository)
 
-    if not user:
-        await message.answer('Пользователь не найден.')
+        if not user:
+            await message.answer('Пользователь не найден.')
+            await state.clear()
+            return
+
+        user_info = format_user_info(user)
+        await state.update_data(user_id=user.telegram_id, isbanned=user.isbanned,
+                                is_admin=(user.status == UserStatus.ADMIN))
+        await message.answer(user_info,
+                             reply_markup=user_action_keyboard(user.isbanned, user.status == UserStatus.ADMIN))
+        await state.set_state(UserManagementStates.waiting_for_action)
+    except Exception as e:
+        bot_requests_logger.error(f'Error in receive_username_or_id: {e}')
+        await message.answer('Ошибка при обработке информации о пользователе.')
         await state.clear()
 
-    user_info = format_user_info(user)
-    await state.update_data(user_id=user.telegram_id, isbanned=user.isbanned, is_admin=(user.status == UserStatus.ADMIN))
-    await message.answer(user_info, reply_markup=user_action_keyboard(user.isbanned, user.status == UserStatus.ADMIN))
-    await state.set_state(UserManagementStates.waiting_for_action)
-
 async def back_to_status(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    user_repository: UserRepository = callback.bot.user_repository
-    user_id = data['user_id']
-    user = await user_repository.get_user_by_id(user_id)
-    user_info = format_user_info(user)
-    await callback.message.edit_text(user_info, reply_markup=user_action_keyboard(user.isbanned, user.status == UserStatus.ADMIN))
-    await callback.answer()
+    ''' Handles the back to user status action in user management. '''
+    try:
+        data = await state.get_data()
+        user_repository: UserRepository = callback.bot.user_repository
+        user_id = data['user_id']
+        user = await user_repository.get_user_by_id(user_id)
+        user_info = format_user_info(user)
+        await callback.message.edit_text(user_info,
+                                         reply_markup=user_action_keyboard(
+                                             user.isbanned, user.status == UserStatus.ADMIN))
+        await callback.answer()
+    except Exception as e:
+        bot_requests_logger.error(f'Error in back_to_status: {e}')
+        await callback.message.answer('Ошибка при возврате к статусу пользователя.')
+        await callback.answer()
 
 def format_user_info(user: User) -> str:
+    ''' Formats user information for display. '''
     return (
         f'Имя пользователя: {user.telegram_username}\n'
         f'ID пользователя: {user.telegram_id}\n'
@@ -50,13 +77,18 @@ def format_user_info(user: User) -> str:
     )
 
 async def fetch_user(user_input: str, user_repository: UserRepository):
-    if user_input.isdigit():
-        return await user_repository.get_user_by_id(int(user_input))
-    else:
-        user = await user_repository.get_user_by_username(user_input)
-        if user:
-            await user_repository.update_user(user.telegram_id, {'telegram_username': user_input})
-        return user
+    '''Fetches user by username or ID.'''
+    try:
+        if user_input.isdigit():
+            return await user_repository.get_user_by_id(int(user_input))
+        else:
+            user = await user_repository.get_user_by_username(user_input)
+            if user:
+                await user_repository.update_user(user.telegram_id, {'telegram_username': user_input})
+            return user
+    except Exception as e:
+        bot_requests_logger.error(f'Error in fetch_user: {e}')
+        return None
 
 def register_handlers_user_management(dp: Dispatcher):
     dp.callback_query.register(user_management, F.data == 'admin_panel:users')
