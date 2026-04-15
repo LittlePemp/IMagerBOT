@@ -13,15 +13,52 @@ class FileRepository:
         self.settings = settings
         self.image_service = ImageService()
 
+    def resolve_image_path(self, image_path: str) -> str:
+        normalized_path = os.path.normpath(image_path)
+        if os.path.isfile(normalized_path):
+            return normalized_path
+
+        groups_marker = os.path.normpath(os.path.join('files', 'groups'))
+        normalized_lower = normalized_path.lower()
+        marker_lower = groups_marker.lower()
+
+        marker_index = normalized_lower.rfind(marker_lower)
+        if marker_index != -1:
+            suffix = normalized_path[marker_index + len(groups_marker):].lstrip('\\/')
+            candidate = os.path.normpath(os.path.join(self.settings.image_groups_relative_path, suffix))
+            if os.path.isfile(candidate):
+                return candidate
+
+        path_parts = normalized_path.split(os.sep)
+        if len(path_parts) >= 2:
+            candidate = os.path.normpath(
+                os.path.join(
+                    self.settings.image_groups_relative_path,
+                    path_parts[-2],
+                    path_parts[-1],
+                )
+            )
+            if os.path.isfile(candidate):
+                return candidate
+
+        return normalized_path
+
     def read_image_file(self, relative_path: str) -> Result:
-        image = cv2.imread(relative_path, cv2.IMREAD_UNCHANGED)
-        if image is None:
+        resolved_path = self.resolve_image_path(relative_path)
+        if not os.path.isfile(resolved_path):
             return Result.Error(f'Image not found at path: {relative_path}')
+
+        image = cv2.imread(resolved_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            return Result.Error(f'Image not found at path: {resolved_path}')
         return Result.Success(image)
 
-    def save_image_file(self, image: np.ndarray, relative_path: str) -> Result:
+    def save_image_file(self, image: np.ndarray, relative_path: str, save_params=None) -> Result:
         try:
-            cv2.imwrite(relative_path, image)
+            if save_params is None:
+                cv2.imwrite(relative_path, image)
+            else:
+                cv2.imwrite(relative_path, image, save_params)
             db_logger.info(f'Image saved at {relative_path}')
             return Result.Success('Image successfully saved')
         except Exception as e:

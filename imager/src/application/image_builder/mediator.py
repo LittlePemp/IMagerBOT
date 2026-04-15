@@ -2,6 +2,8 @@ from typing import Union
 
 from .commands.check_images import (CheckImagesCommand,
                                     CheckImagesCommandHandler)
+from .commands.download_topic import (DownloadTopicCommand,
+                                      DownloadTopicCommandHandler)
 from .commands.generate_image import (GenerateImageCommand,
                                       GenerateImageCommandHandler)
 from .commands.load_images import LoadImagesCommand, LoadImagesCommandHandler
@@ -50,6 +52,8 @@ mediator.register(ValidateImagesDataCommand,
                   ValidateImagesDataCommandHandler())
 mediator.register(CheckImagesCommand,
                   CheckImagesCommandHandler())
+mediator.register(DownloadTopicCommand,
+                  DownloadTopicCommandHandler())
 mediator.register(GetImageDataQuery,
                   GetImageDataQueryHandler())
 mediator.register(GetListImageGroupsQuery,

@@ -1,7 +1,7 @@
 import os
 from random import randint
-from uuid import uuid4
 
+import cv2
 import numpy as np
 from settings import settings
 from src.application.image_builder.errors.services_errors import \
@@ -33,7 +33,7 @@ class ImagerBuilder:
         self.alpha = alpha
         self.noise_degree = noise_degree
 
-    def make_image(self, image_path: str, group: str) -> Result:
+    def make_image(self, image_path: str, group: str, output_name: str | None = None) -> Result:
         try:
             image_result = self.file_repository.read_image_file(image_path)
             if not image_result.is_success:
@@ -62,7 +62,7 @@ class ImagerBuilder:
                 return Result.Error(overlay_result.error)
             final_image = overlay_result.value
 
-            final_image_path_result = self.save_image(final_image)
+            final_image_path_result = self.save_image(final_image, output_name)
             if final_image_path_result.is_success:
                 return Result.Success(final_image_path_result.value)
             return Result.Error(final_image_path_result.error)
@@ -160,6 +160,12 @@ class ImagerBuilder:
                     return Result.Error(resize_result.error)
                 cell_image = resize_result.value
 
+                if len(cell_image.shape) == 3 and cell_image.shape[2] == 4:
+                    convert_result = ImageService.convert_rgba_to_rgb(cell_image)
+                    if not convert_result.is_success:
+                        return Result.Error(convert_result.error)
+                    cell_image = convert_result.value
+
                 y_big = y * self.cell_size
                 x_big = x * self.cell_size
                 result_tile[y_big: y_big + self.cell_size,
@@ -167,12 +173,20 @@ class ImagerBuilder:
 
         return Result.Success(result_tile)
 
-    def save_image(self, final_image: np.ndarray) -> Result:
-        final_image_name = f'IMager_{uuid4()}.png'
+    def save_image(self, final_image: np.ndarray, output_name: str | None = None) -> Result:
+        extension = settings.generated_image_extension.lower().lstrip('.')
+        base_name = output_name or 'imager_result'
+        final_image_name = f'{base_name}.{extension}'
         final_image_path = os.path.join(settings.file_path_prefix + settings.generated_images_path,
                                         final_image_name)
-        result: Result = self.file_repository.save_image_file(final_image,
-                                                              final_image_path)
+        save_params = None
+        if extension in ('jpg', 'jpeg'):
+            save_params = [int(cv2.IMWRITE_JPEG_QUALITY), int(settings.generated_image_jpeg_quality)]
+        result: Result = self.file_repository.save_image_file(
+            final_image,
+            final_image_path,
+            save_params=save_params
+        )
         if result.is_success:
             return Result.Success(final_image_name)
         return Result.Error(result.error)

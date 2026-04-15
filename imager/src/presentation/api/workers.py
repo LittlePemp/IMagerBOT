@@ -21,7 +21,8 @@ async def worker():
                 alpha_channel=request['alpha_channel'],
                 noise_level=request['noise_level'],
                 cell_size=request['cell_size'],
-                result_size=request['result_size']
+                result_size=request['result_size'],
+                output_name=request.get('output_name')
             )
             async with semaphore:
                 result = await asyncio.to_thread(mediator.send, command)

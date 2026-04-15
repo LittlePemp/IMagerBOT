@@ -1,7 +1,11 @@
+import asyncio
+
 import click
 import uvicorn
 from src.application.image_builder.commands.check_images import \
     CheckImagesCommand
+from src.application.image_builder.commands.download_topic import \
+    DownloadTopicCommand
 from src.application.image_builder.commands.generate_image import \
     GenerateImageCommand
 from src.application.image_builder.commands.load_images import \
@@ -17,6 +21,7 @@ from src.application.image_builder.queries.get_image_data import \
     GetImageDataQuery
 from src.application.image_builder.queries.get_list_image_groups import \
     GetListImageGroupsQuery
+from src.presentation.rabbitmq.consumer import run_consumer
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -80,6 +85,27 @@ def check(group_images):
 
 
 @cli.command()
+@click.option('--keyword', required=True, help='Search phrase on fonwall.ru')
+@click.option('--group-name', default=None, help='Destination group name')
+@click.option('--limit', default=None, type=int, help='Maximum number of images to download')
+@click.option('--max-pages', default=25, type=int, help='Maximum number of pages to scan')
+@click.option('--sync/--no-sync', 'sync_to_db', default=True, help='Synchronize downloaded images into MongoDB')
+def download_topic(keyword, group_name, limit, max_pages, sync_to_db):
+    command = DownloadTopicCommand(
+        keyword=keyword,
+        group_name=group_name,
+        limit=limit,
+        max_pages=max_pages,
+        sync_to_db=sync_to_db,
+    )
+    result = mediator.send(command)
+    if result.is_success:
+        click.echo(result.value)
+    else:
+        click.echo(f'Error: {result.error}')
+
+
+@cli.command()
 def list_groups():
     query = GetListImageGroupsQuery()
     groups = mediator.send(query)
@@ -101,8 +127,8 @@ def get_image_data(image_path):
 @click.option('--group_name', required=True, help='Name of the image group')
 @click.option('--insertion_format', default='crop', help='Insertion format: scale or crop')
 @click.option('--alpha_channel', default=30, help='Alpha channel percentage (0-100)')
-@click.option('--noise_level', default=40, help='Noise level for RGB shifts')
-@click.option('--cell_size', default=60, help='Size of each cell in the final image')
+@click.option('--noise_level', default=15, help='Noise level for RGB shifts')
+@click.option('--cell_size', default=40, help='Size of each cell in the final image')
 @click.option('--result_size', default=120, help='Number of cells along the longest side')
 def generate_image(image_path, group_name, insertion_format, alpha_channel, noise_level, cell_size, result_size):
     try:
@@ -130,3 +156,9 @@ def generate_image(image_path, group_name, insertion_format, alpha_channel, nois
 def runserver(host, port):
     '''Run the FastAPI server.'''
     uvicorn.run('src.presentation.api.main:app', host=host, port=port,)
+
+
+@cli.command('run-consumer')
+def run_consumer_command():
+    '''Run RabbitMQ consumer for imager commands.'''
+    asyncio.run(run_consumer())

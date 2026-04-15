@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   mongodb:
     image: mongo
@@ -12,21 +10,34 @@ services:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: example
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
   imager:
     build:
       context: .
       dockerfile: imager/Dockerfile
-    command: python manage.py runserver
+    command: python manage.py run-consumer
     volumes:
       - ../imager:/app
     environment:
       - MONGODB_URI=${MONGODB_URI}
       - DATABASE_NAME=${DATABASE_NAME}
+      - RABBITMQ_URL=${RABBITMQ_URL}
+      - RABBITMQ_REQUESTS_QUEUE=${RABBITMQ_REQUESTS_QUEUE}
       - IMAGE_GROUPS_RELATIVE_PATH=${IMAGE_GROUPS_RELATIVE_PATH}
       - UPLOADED_IMAGES_PATH=${UPLOADED_IMAGES_PATH}
       - GENERATED_IMAGES_PATH=${GENERATED_IMAGES_PATH}
     depends_on:
       - mongodb
+      - rabbitmq
 
 volumes:
   mongo_data:
+  rabbitmq_data:

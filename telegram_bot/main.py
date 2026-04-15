@@ -5,11 +5,13 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher
 from motor.motor_asyncio import AsyncIOMotorClient
 from settings import settings
+from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import \
     register_handlers_admin_panel
 from src.commands.admin_panel.user_management import \
     register_handlers_user_management_total
 from src.commands.main_menu import register_handlers_main_menu
+from src.commands.support.support_handler import register_handlers_support
 from src.models.user import User, UserStatus
 from src.infrastructure.data.unit_of_work import get_uow
 from src.utils.middlewares import logging_middleware
@@ -42,6 +44,8 @@ dp.message.middleware(AuthenticationMiddleware(uow.user_repository))
 
 # Register handlers
 register_handlers_main_menu(dp)
+register_handlers_about(dp)
+register_handlers_support(dp)
 register_handlers_admin_panel(dp)
 register_handlers_user_management_total(dp)
 register_handlers_image_build_params(dp, uow)

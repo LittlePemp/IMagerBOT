@@ -1,6 +1,7 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from src.infrastructure.data.repositories.user_repository import UserRepository
 from src.utils.loggers import db_logger, exception_logger
+from src.infrastructure.data.repositories.generation_history_repository import GenerationHistoryRepository
 from src.infrastructure.data.repositories.image_build_repository import ImageBuildParamsRepository
 from src.infrastructure.data.repositories.image_group_repository import ImageGroupRepository
 
@@ -19,6 +20,7 @@ class MongoUnitOfWork:
         self.db = db
         # Repositories
         self.user_repository = UserRepository(db['users'])
+        self.generation_history_repository = GenerationHistoryRepository(db['generation_history'])
         self.image_build_params_repository = ImageBuildParamsRepository(db['image_build_params'])
         self.image_group_repository = ImageGroupRepository(db['image_groups'])
 

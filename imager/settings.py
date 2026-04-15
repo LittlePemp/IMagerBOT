@@ -8,10 +8,17 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     mongodb_uri: str
     database_name: str
+    rabbitmq_url: str = 'amqp://guest:guest@127.0.0.1:5672/'
+    rabbitmq_requests_queue: str = 'imager.requests'
     file_path_prefix: str = ''
     image_groups_relative_path: str = 'files/groups'
     uploaded_images_path: str = 'files/uploaded'
     generated_images_path: str = 'files/generated'
+    generated_image_extension: str = 'jpg'
+    generated_image_jpeg_quality: int = 90
+    telegram_max_document_size_bytes: int = 47185920
+    generation_estimated_jpeg_bytes_per_pixel: float = 1.0
+    rabbitmq_prefetch_count: int = 1
 
     # Image validation settings
     allowed_formats: List[str] = ['RGB', 'RGBA']

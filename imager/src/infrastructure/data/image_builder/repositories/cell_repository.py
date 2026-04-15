@@ -32,22 +32,35 @@ class CellRepository(IRepository):
 
     def initialize(self):
         if not self._initialized:
-            self.load_data_from_mongo()
-            self.load_images()
-            self.__build_trees()
+            self.refresh()
             db_logger.info('CellRepository initialized')
             self._initialized = True
+
+    def refresh(self):
+        self._data = defaultdict(dict)
+        self._trees = {}
+        self.load_data_from_mongo()
+        self.load_images()
+        self.__build_trees()
 
     def load_data_from_mongo(self):
         for group in self.get_all_groups():
             cell_models = self.mongo_collection.find({'group': group})
             for config in cell_models:
+                stored_path = config['relative_file_path']
+                resolved_path = self.file_repository.resolve_image_path(stored_path)
+                if resolved_path != os.path.normpath(stored_path):
+                    self.mongo_collection.update_one(
+                        {'_id': config['_id']},
+                        {'$set': {'relative_file_path': resolved_path}}
+                    )
+
                 cell_rgb = CellRgb.create(config['r'], config['g'], config['b'])
                 if cell_rgb.is_success:
-                    cell = Cell(cell_rgb.value, config['group'], config['relative_file_path'])
+                    cell = Cell(cell_rgb.value, config['group'], resolved_path)
                     cell_object_result = CellObject.create(cell)
                     if cell_object_result.is_success:
-                        self._data[group][config['relative_file_path']] = cell_object_result.value
+                        self._data[group][resolved_path] = cell_object_result.value
 
     def load_images(self):
         for _, cell_dict in self._data.items():
@@ -65,47 +78,91 @@ class CellRepository(IRepository):
             _, idx = closest_result.value
         return cell_objects[idx] if idx < len(cell_objects) else None
 
-    def load_missing_groups(self) -> Result:
-        # TODO: TRY EXCEPT
-        base_path = self.file_repository.settings.image_groups_relative_path
-        all_groups = set(os.listdir(base_path))
-        existing_groups = set(self.get_all_groups())
-        missing_groups = all_groups - existing_groups
+    def load_missing_groups(self, group_names: list[str] | None = None) -> Result:
+        try:
+            base_path = self.file_repository.settings.image_groups_relative_path
+            all_groups = self._resolve_target_groups(base_path, group_names)
+            existing_file_paths = self._get_existing_file_paths()
+            created_count = 0
 
-        for group_name in missing_groups:
-            group_path = os.path.join(base_path, group_name)
-            image_files = self.file_repository.list_image_files(group_path)
-            for image_file in image_files:
-                image_result = self.file_repository.read_image_file(image_file)
-                if not image_result.is_success:
-                    return Result.Error(image_result.error)
+            for group_name in all_groups:
+                group_path = os.path.join(base_path, group_name)
+                image_files_result = self.file_repository.list_image_files(group_path)
+                if not image_files_result.is_success:
+                    return Result.Error(image_files_result.error)
 
-                image = image_result.value
-                avg_color_tuple = self.file_repository.image_service.average_color(image)
-                avg_color_result = CellRgb.create(*avg_color_tuple)
+                for image_file in image_files_result.value:
+                    if image_file in existing_file_paths:
+                        continue
 
-                if not avg_color_result.is_success:
-                    self.file_repository.delete_image_file(image_file)
-                    return Result.Error(avg_color_result.error)
+                    add_result = self._add_image_to_collection(group_name, image_file)
+                    if not add_result.is_success:
+                        return add_result
+                    existing_file_paths.add(image_file)
+                    created_count += 1
 
-                cell_result = CellObject.create_from_image(
-                    avg_color_result.value, group_name, image_file)
-                if not cell_result.is_success:
-                    self.file_repository.delete_image_file(image_file)
-                    return Result.Error(cell_result.error)
+            if created_count:
+                self.refresh()
 
-                cell: CellObject = cell_result.value
-                new_config = {
-                    'r': cell.cell.rgb.r.value,
-                    'g': cell.cell.rgb.g.value,
-                    'b': cell.cell.rgb.b.value,
-                    'group': cell.cell.group,
-                    'relative_file_path': cell.cell.relative_file_path
-                }
-                self.mongo_collection.insert_one(new_config)
-                db_logger.info(f'CREATED {cell}')
+            return Result.Success(f'Synchronized {created_count} images')
+        except Exception as e:
+            return Result.Error(f'Failed to synchronize image groups: {e}')
 
-        return Result.Success('Missing groups loaded successfully')
+    def _resolve_target_groups(self, base_path: str, group_names: list[str] | None) -> list[str]:
+        if group_names:
+            return [group_name for group_name in group_names if os.path.isdir(os.path.join(base_path, group_name))]
+        return [
+            group_name
+            for group_name in os.listdir(base_path)
+            if os.path.isdir(os.path.join(base_path, group_name))
+        ]
+
+    def _get_existing_file_paths(self) -> set[str]:
+        return {
+            item['relative_file_path']
+            for item in self.mongo_collection.find({}, {'relative_file_path': 1})
+        }
+
+    def _add_image_to_collection(self, group_name: str, image_file: str) -> Result:
+        image_result = self.file_repository.read_image_file(image_file)
+        if not image_result.is_success:
+            return Result.Error(image_result.error)
+
+        image = image_result.value
+        if len(image.shape) == 3 and image.shape[2] == 4:
+            convert_result = self.file_repository.image_service.convert_rgba_to_rgb(image)
+            if not convert_result.is_success:
+                return Result.Error(convert_result.error)
+            image = convert_result.value
+
+        avg_color_result = self.file_repository.image_service.average_color(image)
+        if not avg_color_result.is_success:
+            return Result.Error(avg_color_result.error)
+
+        avg_rgb = avg_color_result.value[:3]
+        cell_rgb_result = CellRgb.create(*avg_rgb)
+        if not cell_rgb_result.is_success:
+            return Result.Error(cell_rgb_result.error)
+
+        cell_result = CellObject.create_from_image(
+            cell_rgb_result.value,
+            group_name,
+            image_file,
+        )
+        if not cell_result.is_success:
+            return Result.Error(cell_result.error)
+
+        cell: CellObject = cell_result.value
+        new_config = {
+            'r': cell.cell.rgb.r.value,
+            'g': cell.cell.rgb.g.value,
+            'b': cell.cell.rgb.b.value,
+            'group': cell.cell.group,
+            'relative_file_path': cell.cell.relative_file_path
+        }
+        self.mongo_collection.insert_one(new_config)
+        db_logger.info(f'CREATED {cell}')
+        return Result.Success(new_config)
 
     def get_all_groups(self) -> list[str]:
         pipeline = [{'$group': {'_id': '$group'}}]

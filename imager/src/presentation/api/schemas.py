@@ -6,9 +6,10 @@ class GenerateImageRequest(BaseModel):
     group_name: str
     insertion_format: str = 'crop'
     alpha_channel: int = 30
-    noise_level: int = 40
-    cell_size: int = 60
+    noise_level: int = 15
+    cell_size: int = 40
     result_size: int = 120
+    output_name: str | None = None
 
 
 class GenerateImageResponse(BaseModel):
@@ -21,3 +22,7 @@ class GroupInfo(BaseModel):
 
 class ListGroupsResponse(BaseModel):
     groups: list[GroupInfo]
+
+
+class SyncGroupsResponse(BaseModel):
+    message: str

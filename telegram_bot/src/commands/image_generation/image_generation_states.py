@@ -1,9 +1,13 @@
-
 from aiogram.fsm.state import State, StatesGroup
 
+
 class ImageGenerationStates(StatesGroup):
+    choosing_generation_mode = State()
     selecting_image_size = State()
     selecting_noise_level = State()
     selecting_inset_size = State()
+    waiting_manual_image_size = State()
+    waiting_manual_noise_level = State()
+    waiting_manual_inset_size = State()
     selecting_image_group = State()
     waiting_for_image_upload = State()

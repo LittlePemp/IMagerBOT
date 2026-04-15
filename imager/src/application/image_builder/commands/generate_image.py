@@ -13,7 +13,7 @@ from ..services.imager_builder import ImagerBuilder
 class GenerateImageCommand(ICommand):
     def __init__(
         self, image_path, insertion_format, alpha_channel,
-        noise_level, cell_size, result_size, group_name
+        noise_level, cell_size, result_size, group_name, output_name=None
     ):
         self.image_path = image_path
         self.insertion_format = insertion_format
@@ -22,6 +22,7 @@ class GenerateImageCommand(ICommand):
         self.cell_size = cell_size
         self.result_size = result_size
         self.group_name = group_name
+        self.output_name = output_name
 
 
 class GenerateImageCommandHandler(ICommandHandler):
@@ -51,6 +52,18 @@ class GenerateImageCommandHandler(ICommandHandler):
             if not result_size_result.is_success:
                 return result_size_result
 
+            estimated_pixels = (command.result_size * command.cell_size) ** 2
+            estimated_bytes = int(
+                estimated_pixels * settings.generation_estimated_jpeg_bytes_per_pixel
+            )
+            if estimated_bytes > settings.telegram_max_document_size_bytes:
+                return CommandsErrorMessages.output_estimate_too_large(
+                    command.result_size,
+                    command.cell_size,
+                    estimated_bytes,
+                    settings.telegram_max_document_size_bytes,
+                )
+
             image_group_result = ImageGroup.create(command.group_name)
             if not image_group_result.is_success:
                 return image_group_result
@@ -66,7 +79,8 @@ class GenerateImageCommandHandler(ICommandHandler):
             )
             image_path = settings.file_path_prefix + command.image_path
             final_image_result = builder.make_image(image_path,
-                                                    command.group_name)
+                                                    command.group_name,
+                                                    command.output_name)
             if not final_image_result.is_success:
                 return final_image_result
 

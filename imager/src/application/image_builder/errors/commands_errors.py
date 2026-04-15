@@ -50,3 +50,11 @@ class CommandsErrorMessages:
     @staticmethod
     def missing_images(missing_images):
         return Result.Error(f'Missing images: {missing_images}')
+
+    @staticmethod
+    def output_estimate_too_large(result_size, cell_size, estimated_bytes, max_bytes):
+        return Result.Error(
+            'Requested output is estimated to be too large for Telegram: '
+            f'result_size({result_size}), cell_size({cell_size}), '
+            f'estimated_bytes({estimated_bytes}) > max_bytes({max_bytes})'
+        )

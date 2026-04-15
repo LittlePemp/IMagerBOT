@@ -167,3 +167,5 @@ imager/files/
 imager/files/
 files/
 !imager\files\test_image.png
+*.tmp
+*.packages

@@ -8,13 +8,28 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     api_token: SecretStr
     mongodb_uri: str
-    imager_service_url: str
+    rabbitmq_url: str = 'amqp://guest:guest@127.0.0.1:5672/'
+    rabbitmq_requests_queue: str = 'imager.requests'
     telegram_admin_ids: str  # List read fix
     database_name: str = 'telegram_bot'
     image_groups_relative_path: str = 'files/groups'
     uploaded_images_path: str = 'files/uploaded'
     generated_images_path: str = 'files/generated'
     tzinfo: ZoneInfo = ZoneInfo('Europe/Moscow')
+    generation_default_insertion_format: str = 'crop'
+    generation_default_alpha_channel: int = 30
+    generation_default_noise_level: int = 15
+    generation_default_cell_size: int = 40
+    generation_default_result_size: int = 120
+    generation_noise_level_min: int = 0
+    generation_noise_level_max: int = 100
+    generation_cell_size_min: int = 1
+    generation_cell_size_max: int = 200
+    generation_result_size_min: int = 1
+    generation_result_size_max: int = 300
+    telegram_max_document_size_bytes: int = 47185920
+    generation_estimated_jpeg_bytes_per_pixel: float = 1.0
+    regular_user_upload_limit: int = 5
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

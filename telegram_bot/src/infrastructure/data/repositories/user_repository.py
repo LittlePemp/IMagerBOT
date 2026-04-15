@@ -117,3 +117,30 @@ class UserRepository:
         except Exception as e:
             exception_logger.error(f'Failed to get admins: {e}')
             return []
+
+    async def get_generation_preferences(self, telegram_id: int) -> Optional[dict]:
+        try:
+            user_data = await self.collection.find_one(
+                {'telegram_id': telegram_id},
+                {'last_manual_generation': 1, '_id': 0}
+            )
+            if not user_data:
+                return None
+            return user_data.get('last_manual_generation')
+        except Exception as e:
+            exception_logger.error(f'Failed to get generation preferences for user {telegram_id}: {e}')
+            return None
+
+    async def update_generation_preferences(self, telegram_id: int, preferences: dict) -> bool:
+        try:
+            result = await self.collection.update_one(
+                {'telegram_id': telegram_id},
+                {'$set': {'last_manual_generation': preferences}}
+            )
+            if result.matched_count:
+                db_logger.info(f'Generation preferences updated for user {telegram_id}: {preferences}')
+                return True
+            return False
+        except Exception as e:
+            exception_logger.error(f'Failed to update generation preferences for user {telegram_id}: {e}')
+            return False
