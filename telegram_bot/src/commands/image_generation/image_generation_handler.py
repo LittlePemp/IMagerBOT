@@ -1,12 +1,12 @@
-import os
-import random
-import re
+import tempfile
+from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
 from datetime import datetime
 from functools import partial
 
 from aiogram import Dispatcher, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, Message
 
 try:
     from aiogram.types import ReactionTypeEmoji
@@ -15,11 +15,11 @@ except ImportError:  # pragma: no cover
 
 from settings import settings
 from src.commands.common_keyboards import home_keyboard
-from src.commands.main_menu import MAIN_MENU_TEXT, build_main_menu_keyboard, main_menu
+from src.commands.main_menu import MAIN_MENU_TEXT, build_main_menu_keyboard
 from src.infrastructure.data.unit_of_work import MongoUnitOfWork
 from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
-from src.models.generation_history import GenerationHistoryRecord
+from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 from src.models.image_build_params import ParamType
 from src.models.user import User
 from src.utils.loggers import bot_requests_logger, exception_logger
@@ -45,19 +45,6 @@ def _format_number(value: float | int) -> str:
     if numeric_value.is_integer():
         return str(int(numeric_value))
     return str(numeric_value)
-
-
-def _sanitize_username(user: User) -> str:
-    raw_username = user.telegram_username or user.name or f"user_{user.telegram_id}"
-    normalized = re.sub(r"[^A-Za-z0-9_]+", "_", raw_username).strip("_")
-    return normalized or f"user_{user.telegram_id}"
-
-
-def _build_file_stem(user: User) -> str:
-    timestamp = datetime.now(settings.tzinfo).strftime("%Y%m%d_%H%M%S")
-    username = _sanitize_username(user)
-    unique_number = random.randint(100000, 999999)
-    return f"{timestamp}_{username}_{unique_number}"
 
 
 def _manual_defaults_from_preferences(preferences: dict | None) -> dict:
@@ -428,6 +415,11 @@ async def select_image_group(callback: CallbackQuery, state: FSMContext, uow: Mo
     await callback.answer()
 
 
+def _generation_job_id(message) -> str:
+    # Telegram update redelivery must address the same logical generation.
+    return str(uuid5(NAMESPACE_URL, f"imager:telegram:{message.chat.id}:{message.message_id}"))
+
+
 async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWork, user: User):
     if not message.photo:
         await message.answer(
@@ -436,14 +428,26 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
         )
         return
 
-    if not user.is_admin:
-        user_upload_count = await uow.generation_history_repository.count_user_records(user.telegram_id)
-        if user_upload_count >= settings.regular_user_upload_limit:
+    job_id = _generation_job_id(message)
+    try:
+        existing = await imager_service.get_job(job_id)
+        if existing is not None:
             await message.reply(
-                (
-                    "Вы достигли лимита на загрузку изображений.\n"
-                    f"Для обычного пользователя доступно {settings.regular_user_upload_limit} загрузок."
-                ),
+                f"Это изображение уже принято. Задание: {job_id}. Статус: {existing['status']}.",
+                reply_markup=home_keyboard(),
+            )
+            await state.clear()
+            return
+    except Exception:
+        exception_logger.exception("Не удалось проверить приём задания")
+        await message.reply("Сервис заданий временно недоступен. Попробуйте позже.")
+        return
+
+    if not user.is_admin:
+        count = await uow.generation_history_repository.count_user_records(user.telegram_id)
+        if count >= settings.regular_user_upload_limit:
+            await message.reply(
+                f"Вы достигли лимита: {settings.regular_user_upload_limit} загрузок.",
                 reply_markup=home_keyboard(),
             )
             return
@@ -454,101 +458,78 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
         await message.reply(limit_error, reply_markup=home_keyboard())
         return
 
-    history_record_id = None
+    history_record_id = generation_history_record_id(job_id)
     try:
         await _set_processing_reaction(message)
-        file_stem = _build_file_stem(user)
         photo = message.photo[-1]
         file = await message.bot.get_file(photo.file_id)
-        upload_file_name = f"{file_stem}_upload.jpg"
-        file_path = f"{settings.uploaded_images_path}/{upload_file_name}"
-        await message.bot.download_file(file.file_path, file_path)
-        await state.update_data(image_path=file_path, output_name=f"{file_stem}_result")
+        # Local files are bounded transfer buffers, never shared with the core.
+        with tempfile.TemporaryDirectory(prefix="imager-upload-") as directory:
+            source_path = Path(directory) / "source.jpg"
+            await message.bot.download_file(file.file_path, str(source_path))
+            source = await imager_service.upload_source(source_path, job_id)
 
-        generation_data = await state.get_data()
-        queue_position = await uow.generation_history_repository.count_active_records() + 1
+        now = datetime.now(settings.tzinfo)
         history_record = GenerationHistoryRecord(
+            job_id=job_id,
             telegram_id=user.telegram_id,
             telegram_username=user.telegram_username,
-            queue_position=queue_position,
-            source_image_path=file_path,
+            queue_position=None,
+            source_image_path=f"s3://{source['bucket']}/{source['key']}",
             result_image_path=None,
-            image_group=generation_data["image_group"],
-            generation_mode=generation_data.get("generation_mode", GENERATION_MODE_PRESETS),
-            insertion_format=generation_data.get("insertion_format", settings.generation_default_insertion_format),
-            alpha_channel=int(generation_data.get("alpha_channel", settings.generation_default_alpha_channel)),
-            noise_level=int(generation_data["noise_level"]),
-            cell_size=int(generation_data["inset_size"]),
-            result_size=int(generation_data["image_size"]),
-            status="queued",
-            error_message=None,
-            created_at=datetime.now(settings.tzinfo),
-            updated_at=datetime.now(settings.tzinfo),
-        )
-        history_record_id = await uow.generation_history_repository.create_record(history_record)
-        await message.reply(f"Изображение принято в работу. Вы в очереди: {queue_position}.")
-    except Exception:
-        exception_logger.exception("Ошибка при загрузке изображения")
-        await message.reply("Не удалось загрузить изображение. Попробуйте ещё раз.")
-        return
-
-    data = await state.get_data()
-    try:
-        generate_image_request = GenerateImageRequest(
-            image_path=data["image_path"],
-            group_name=data["image_group"],
+            image_group=data["image_group"],
+            generation_mode=data.get("generation_mode", GENERATION_MODE_PRESETS),
             insertion_format=data.get("insertion_format", settings.generation_default_insertion_format),
-            alpha_channel=data.get("alpha_channel", settings.generation_default_alpha_channel),
+            alpha_channel=int(data.get("alpha_channel", settings.generation_default_alpha_channel)),
             noise_level=int(data["noise_level"]),
             cell_size=int(data["inset_size"]),
             result_size=int(data["image_size"]),
-            output_name=data["output_name"],
+            status="queued",
+            created_at=now,
+            updated_at=now,
         )
-        imager_response = await imager_service.generate_image(generate_image_request)
-        generated_image_path = f"{settings.generated_images_path}/{imager_response.path}"
-
-        if os.path.getsize(generated_image_path) > settings.telegram_max_document_size_bytes:
-            if history_record_id:
-                await uow.generation_history_repository.update_record(
-                    history_record_id,
-                    status="failed",
-                    error_message="Result file is too large for Telegram",
-                    queue_position=0,
-                )
-            await message.reply(
-                "Изображение собрано, но файл слишком большой для отправки в Telegram. "
-                "Уменьшите размер изображения или размер ячейки.",
-                reply_markup=home_keyboard(),
-            )
-            return
-
-        input_file = FSInputFile(generated_image_path)
-        await message.reply_document(document=input_file, caption="Ваше изображение готово.")
-        if history_record_id:
-            await uow.generation_history_repository.update_record(
-                history_record_id,
-                status="completed",
-                result_image_path=generated_image_path,
-                queue_position=0,
-            )
-    except Exception as e:
-        exception_logger.exception("Ошибка при генерации изображения")
-        if history_record_id:
-            await uow.generation_history_repository.update_record(
-                history_record_id,
-                status="failed",
-                error_message=str(e),
-                queue_position=0,
-            )
+        request = GenerateImageRequest(
+            source=source,
+            group_name=data["image_group"],
+            insertion_format=data.get("insertion_format", settings.generation_default_insertion_format),
+            alpha_channel=int(data.get("alpha_channel", settings.generation_default_alpha_channel)),
+            noise_level=int(data["noise_level"]),
+            cell_size=int(data["inset_size"]),
+            result_size=int(data["image_size"]),
+        )
+        await imager_service.submit_generation(
+            request,
+            job_id=job_id,
+            client_context={
+                "chat_id": message.chat.id,
+                "reply_to_message_id": message.message_id,
+                "user_id": user.telegram_id,
+                "history_record_id": history_record_id,
+                "display_name": f"imager_{job_id}",
+                "generation_mode": data.get("generation_mode", GENERATION_MODE_PRESETS),
+            },
+        )
+    except Exception as error:
+        exception_logger.exception(f"Ошибка при приёме изображения: job_id={job_id}")
         await message.reply(
-            str(e) or "Не удалось сгенерировать изображение. Попробуйте ещё раз.",
+            f"Не удалось подтвердить приём задания {job_id}. {str(error)}",
             reply_markup=home_keyboard(),
         )
         return
 
+    # The authoritative inbox is already durable. A missing projection is
+    # repaired from that accepted command by the completion notifier.
+    try:
+        if await uow.generation_history_repository.create_record(history_record) != history_record_id:
+            raise RuntimeError("Не удалось сохранить проекцию истории задания.")
+    except Exception:
+        exception_logger.exception(f"Задание принято, но история не сохранена: job_id={job_id}")
     await state.clear()
-    bot_requests_logger.info("FSM state cleared after image generation.")
-    await main_menu(message, user)
+    await message.reply(
+        f"Изображение принято. Задание: {job_id}.\n"
+        "Оно будет обработано свободным воркером. Результат придёт отдельным сообщением.",
+        reply_markup=build_main_menu_keyboard(user.is_admin),
+    )
 
 
 async def back_to_previous(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):

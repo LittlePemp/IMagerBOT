@@ -1,0 +1,15 @@
+.git
+.local
+**/.env
+**/.env.*
+**/.packages
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.tmp
+**/tmp
+**/files
+**/logs
+**/*.pyc
+infra/secrets
+*.log

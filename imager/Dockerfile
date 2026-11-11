@@ -1,10 +1,12 @@
 FROM python:3.12-slim
 
-WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app:/app/imager
+WORKDIR /app/imager
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY imager/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY . .
+COPY imager_contracts /app/imager_contracts
+COPY imager /app/imager
 
-CMD ["python", "manage.py", "run-consumer"]
+CMD ["python", "-m", "src.presentation.temporal.worker"]

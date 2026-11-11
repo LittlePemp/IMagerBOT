@@ -2,8 +2,8 @@ from loguru import logger
 
 logger.add(
     'logs/database.log',
-    rotation='1 week',
-    retention='1 month',
+    rotation='10 MB',
+    retention=3,
     level='DEBUG',
     format='{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}',
     enqueue=True,

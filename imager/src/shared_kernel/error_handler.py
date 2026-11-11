@@ -13,7 +13,7 @@ class OperationError(str):
 def error_from_exception(error, context='Operation failed'):
     return OperationError(
         f'{context}: {error}',
-        retryable=isinstance(
+        retryable=bool(getattr(error, 'retryable', False)) or isinstance(
             error, (ConnectionError, TimeoutError, AutoReconnect,
                     ConnectionFailure, ExecutionTimeout),
         ),

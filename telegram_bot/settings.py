@@ -1,7 +1,7 @@
 import os
 from zoneinfo import ZoneInfo
 
-from pydantic import SecretStr
+from pydantic import SecretStr, Field
 from pydantic_settings import BaseSettings
 
 
@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     rabbitmq_requests_queue: str = 'imager.requests'
     telegram_admin_ids: str  # List read fix
     database_name: str = 'telegram_bot'
+    imager_database_name: str = 'imager_core'
+    minio_endpoint: str = 'minio:9000'
+    minio_access_key: SecretStr = SecretStr('')
+    minio_secret_key: SecretStr = SecretStr('')
+    minio_bucket: str = 'imager'
+    minio_secure: bool = False
+    bot_notification_poll_seconds: float = Field(default=2, gt=0, le=60)
+    bot_notification_lease_seconds: int = Field(default=120, ge=10, le=3600)
+    bot_notification_max_attempts: int = Field(default=5, ge=1, le=20)
     image_groups_relative_path: str = 'files/groups'
     uploaded_images_path: str = 'files/uploaded'
     generated_images_path: str = 'files/generated'

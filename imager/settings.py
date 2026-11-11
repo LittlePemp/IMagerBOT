@@ -2,13 +2,24 @@ import os
 import math
 from typing import List, Tuple
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     mongodb_uri: str
     database_name: str
+    temporal_address: str = 'temporal:7233'
+    temporal_namespace: str = 'imager'
+    temporal_task_queue: str = 'imager-render'
+    temporal_dispatch_poll_seconds: float = Field(default=1, gt=0, le=60)
+    temporal_worker_identity: str = ''
+    job_execution_lease_seconds: int = Field(default=60, ge=30, le=600)
+    minio_endpoint: str = 'minio:9000'
+    minio_access_key: SecretStr = SecretStr('')
+    minio_secret_key: SecretStr = SecretStr('')
+    minio_bucket: str = 'imager'
+    minio_secure: bool = False
     rabbitmq_url: str = 'amqp://guest:guest@127.0.0.1:5672/'
     rabbitmq_requests_queue: str = 'imager.requests'
     file_path_prefix: str = ''

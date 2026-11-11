@@ -278,28 +278,5 @@ class TestRabbitQueue(unittest.IsolatedAsyncioTestCase):
             message.nack.assert_not_called()
 
 
-class TestBotRpcRetry(unittest.IsolatedAsyncioTestCase):
-    async def test_transport_retry_keeps_request_identifier(self):
-        class AmqpError(Exception):
-            pass
-
-        path = ROOT.parent / 'telegram_bot/src/infrastructure/services/imager_service/imager_service.py'
-        syntax = ast.parse(path.read_text(encoding='utf-8'))
-        syntax.body = [node for node in syntax.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
-        namespace = {
-            'asyncio': asyncio, 'json': json, 'uuid': uuid, 'service_logger': Mock(),
-            'aio_pika': SimpleNamespace(exceptions=SimpleNamespace(AMQPException=AmqpError)),
-            'GenerateImageRequest': object, 'GenerateImageResponse': object,
-            'ListGroupsResponse': object, 'SyncGroupsResponse': object,
-        }
-        exec(compile(syntax, str(path), 'exec'), namespace)
-        service = namespace['ImagerService']('unused', 'requests')
-        response = {'status': 'ok', 'data': {'path': 'result.jpg'}}
-        service._rpc_once = AsyncMock(side_effect=[asyncio.TimeoutError(), response])
-        self.assertEqual(await service._rpc('generate_image', {}), response)
-        first, second = service._rpc_once.await_args_list
-        self.assertEqual(first.args[2], second.args[2])
-
-
 if __name__ == '__main__':
     unittest.main()

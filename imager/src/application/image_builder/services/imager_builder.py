@@ -23,7 +23,7 @@ from src.shared_kernel.result import Result
 
 
 class ImagerBuilder:
-    def __init__(self, file_repository: ImageFiles, cell_repository: ImageCatalog,
+    def __init__(self, file_repository: ImageFiles | None, cell_repository: ImageCatalog,
                  insertion_format: str, result_size: int, cell_size: int,
                  alpha: float, noise_degree: int, seed: int | None = None):
         self.file_repository = file_repository
@@ -50,13 +50,31 @@ class ImagerBuilder:
                 )
                 if not image_result:
                     return image_result
+                rendered = self.render_image(image_result.value, group)
+                if not rendered:
+                    return rendered
+                return self._checked(self.save_image(rendered.value, output_name),
+                                     'Save mosaic')
+            except Exception as error:
+                return ServicesErrorMessages.error_in_make_image(error)
+
+    def render_image(self, image: np.ndarray, group: str,
+                     progress_callback=None) -> Result:
+        """Calculate pixels without persistent filesystem or transport effects.
+
+        Container Activities use this entry point with MinIO object adapters;
+        legacy local CLI calls continue to use make_image().
+        """
+        with generation_slot():
+            try:
+                self._progress_callback = progress_callback
                 normalized = self._checked(
-                    ImageService.normalize_image(image_result.value), 'Normalize source'
+                    ImageService.normalize_image(image), 'Normalize source'
                 )
                 if not normalized:
                     return normalized
                 image = normalized.value
-                image_result = normalized = None
+                normalized = None
                 validation = self._checked(ImageService.validate_image(
                     image, min_size=settings.min_size, max_size=settings.max_size,
                     aspect_ratio_limits=settings.aspect_ratio_limits,
@@ -84,10 +102,11 @@ class ImagerBuilder:
                 ), 'Blend source')
                 if not blended:
                     return blended
-                return self._checked(self.save_image(blended.value, output_name),
-                                     'Save mosaic')
+                return blended
             except Exception as error:
                 return ServicesErrorMessages.error_in_make_image(error)
+            finally:
+                self._progress_callback = None
 
     def _check_render_budget(self, width, height):
         cells = width * height
@@ -133,6 +152,11 @@ class ImagerBuilder:
             prepared = OrderedDict()
             prepared_bytes = 0
             for index, cell in enumerate(cells):
+                if index % 256 == 0 and getattr(self, '_progress_callback', None):
+                    self._progress_callback({
+                        'stage': 'rendering', 'completed_cells': index,
+                        'total_cells': len(cells),
+                    })
                 if cell is None:
                     return Result.Error(ServicesErrorMessages.no_closest_cell_found(
                         tuple(colors[index]), group,
@@ -170,6 +194,11 @@ class ImagerBuilder:
                 y, x = divmod(index, width)
                 result[y * self.cell_size:(y + 1) * self.cell_size,
                        x * self.cell_size:(x + 1) * self.cell_size] = cell_image
+            if getattr(self, '_progress_callback', None):
+                self._progress_callback({
+                    'stage': 'rendering', 'completed_cells': len(cells),
+                    'total_cells': len(cells),
+                })
             return Result.Success(result)
         except Exception as error:
             return ServicesErrorMessages.error_in_make_image(error)

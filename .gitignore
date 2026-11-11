@@ -169,3 +169,8 @@ files/
 !imager\files\test_image.png
 *.tmp
 *.packages
+
+# Project-local container data and generated credentials.
+.local/
+infra/.env
+infra/secrets/

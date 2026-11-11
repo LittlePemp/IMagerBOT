@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher
@@ -22,6 +23,8 @@ from src.utils.loggers import exception_logger
 from src.utils.loggers import bot_requests_logger
 from src.commands.admin_panel.image_build_params.image_build_params_handler import register_handlers_image_build_params
 from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
+from src.infrastructure.services.imager_service import imager_service
+from src.infrastructure.services.imager_service.notifier import GenerationNotifier
 
 logging.basicConfig(level=logging.INFO)
 
@@ -29,7 +32,10 @@ bot = Bot(token=settings.api_token.get_secret_value())
 dp = Dispatcher()
 
 # DB
-mongo_client = AsyncIOMotorClient(settings.mongodb_uri)
+mongo_client = AsyncIOMotorClient(
+    settings.mongodb_uri, tz_aware=True, serverSelectionTimeoutMS=10000,
+    connectTimeoutMS=5000, socketTimeoutMS=10000, waitQueueTimeoutMS=10000,
+)
 db = mongo_client.get_database(settings.database_name)
 uow = get_uow(db)
 
@@ -92,10 +98,30 @@ async def set_initial_admin():
                 await uow_instance.user_repository.add_user(user_data)
 
 async def main():
-    settings.create_directories()  # TODO:
     await set_initial_admin()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    try:
+        groups = await imager_service.list_groups()
+        await uow.image_group_repository.sync_groups(groups.groups)
+    except Exception:
+        exception_logger.exception('Не удалось обновить список библиотек MinIO при запуске')
+    stop_notifications = asyncio.Event()
+    notifier = GenerationNotifier(imager_service, bot, uow.generation_history_repository)
+    notifier_task = asyncio.create_task(notifier.run(stop_notifications), name='generation-notifier')
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, close_bot_session=False)
+    finally:
+        stop_notifications.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(notifier_task), timeout=30)
+        except asyncio.TimeoutError:
+            notifier_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await notifier_task
+        finally:
+            imager_service.close()
+            mongo_client.close()
+            await bot.session.close()
 
 if __name__ == '__main__':
     asyncio.run(main())

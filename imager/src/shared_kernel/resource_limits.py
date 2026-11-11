@@ -66,7 +66,24 @@ def current_rss_bytes():
         return int(counters.WorkingSetSize)
     try:
         with open('/proc/self/statm', encoding='ascii') as stream:
-            return int(stream.read().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+            resident = int(stream.read().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+        # In the dedicated bounded worker include page cache/tmpfs as well.
+        # Do not count an unbounded host/parent cgroup as this application's RAM.
+        for limit_path, usage_path in (
+            ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current'),
+            ('/sys/fs/cgroup/memory/memory.limit_in_bytes',
+             '/sys/fs/cgroup/memory/memory.usage_in_bytes'),
+        ):
+            try:
+                with open(limit_path, encoding='ascii') as stream:
+                    limit = int(stream.read().strip())
+                if 0 < limit <= MEMORY_LIMIT_BYTES:
+                    with open(usage_path, encoding='ascii') as stream:
+                        resident = max(resident, int(stream.read().strip()))
+                    break
+            except (OSError, ValueError):
+                continue
+        return resident
     except (OSError, IndexError, ValueError):
         import resource
         import sys

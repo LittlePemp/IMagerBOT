@@ -27,3 +27,4 @@ typing_extensions==4.12.2
 tzdata==2024.1
 win32-setctime==1.1.0
 yarl==1.9.4
+minio==7.2.20

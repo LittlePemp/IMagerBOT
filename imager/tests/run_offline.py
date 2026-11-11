@@ -13,7 +13,10 @@ from unittest.mock import Mock
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    sys.path[:0] = [str(root), str(root / '.packages')]
+    extra_dependencies = os.environ.get('IMAGER_TEST_DEPS')
+    sys.path[:0] = [str(root.parent), str(root),
+                    *([extra_dependencies] if extra_dependencies else []),
+                    str(root / '.packages')]
     os.environ['MONGODB_URI'] = 'mongodb://127.0.0.1:1'
     os.environ['DATABASE_NAME'] = 'offline_tests'
     os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'

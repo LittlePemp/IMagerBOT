@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorCollection
+from pymongo.errors import DuplicateKeyError
 
 from settings import settings
-from src.models.generation_history import GenerationHistoryRecord
+from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 from src.utils.loggers import db_logger, exception_logger
 
 
@@ -24,8 +25,23 @@ class GenerationHistoryRepository:
 
     async def create_record(self, record: GenerationHistoryRecord) -> Optional[str]:
         try:
-            result = await self.collection.insert_one(record.model_dump())
-            record_id = str(result.inserted_id)
+            document = record.model_dump()
+            if record.job_id:
+                from bson import ObjectId
+
+                record_id = generation_history_record_id(record.job_id)
+                document['_id'] = ObjectId(record_id)
+                try:
+                    await self.collection.update_one(
+                        {'_id': document['_id']}, {'$setOnInsert': document}, upsert=True,
+                    )
+                except DuplicateKeyError:
+                    # Concurrent projections of the same accepted command
+                    # race on the same immutable Mongo identity.
+                    pass
+            else:
+                result = await self.collection.insert_one(document)
+                record_id = str(result.inserted_id)
             db_logger.info(f"Generation history record created: {record_id}")
             return record_id
         except Exception as e:

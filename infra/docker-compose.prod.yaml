@@ -1,0 +1,5 @@
+# This project does not silently label a SQLite development server production.
+# Deploy a supported Temporal Service (for example backed by PostgreSQL), then
+# provide its address and auth/TLS configuration to worker/dispatcher services.
+# See README.md, "Эксплуатационные границы". This file intentionally starts nothing.
+services: {}

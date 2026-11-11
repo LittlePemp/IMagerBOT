@@ -1,44 +1,186 @@
+name: imager-temporal
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-core-environment: &core-environment
+  MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
+  DATABASE_NAME: imager_core
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: imager
+  TEMPORAL_TASK_QUEUE: imager-render
+  TEMPORAL_DISPATCH_POLL_SECONDS: "1"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+  MINIO_BUCKET: imager
+  MINIO_SECURE: "false"
+
+x-core: &core
+  image: imager-temporal/core:local
+  build:
+    context: ..
+    dockerfile: imager/Dockerfile
+  environment: *core-environment
+  restart: unless-stopped
+  logging: *logging
+  init: true
+  stop_grace_period: 60s
+  depends_on:
+    mongodb:
+      condition: service_healthy
+    temporal:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
 services:
   mongodb:
-    image: mongo
-    container_name: mongodb
-    ports:
-      - '27017:27017'
-    volumes:
-      - mongo_data:/data/db
+    image: mongo:7.0
+    restart: unless-stopped
+    logging: *logging
     environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: example
-
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: rabbitmq
-    ports:
-      - '5672:5672'
-      - '15672:15672'
+      MONGO_INITDB_ROOT_USERNAME: imager
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Run infra/setup.py}
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+      - type: bind
+        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/mongo
+        target: /data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand('ping').ok ? 0 : 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
-  imager:
+  minio:
+    image: imager-temporal/minio:2025-10-15
     build:
-      context: ../imager
-      dockerfile: Dockerfile
-    mem_limit: 1000000000
-    command: python manage.py run-consumer
-    volumes:
-      - ../imager:/app
+      context: ..
+      dockerfile: infra/minio.Dockerfile
+    restart: unless-stopped
+    logging: *logging
     environment:
-      - MONGODB_URI=${MONGODB_URI}
-      - DATABASE_NAME=${DATABASE_NAME}
-      - RABBITMQ_URL=${RABBITMQ_URL}
-      - RABBITMQ_REQUESTS_QUEUE=${RABBITMQ_REQUESTS_QUEUE}
-      - IMAGE_GROUPS_RELATIVE_PATH=${IMAGE_GROUPS_RELATIVE_PATH}
-      - UPLOADED_IMAGES_PATH=${UPLOADED_IMAGES_PATH}
-      - GENERATED_IMAGES_PATH=${GENERATED_IMAGES_PATH}
-    depends_on:
-      - mongodb
-      - rabbitmq
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - type: bind
+        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/minio
+        target: /data
+    ports:
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
 
-volumes:
-  mongo_data:
-  rabbitmq_data:
+  temporal:
+    image: temporalio/temporal:1.10.0
+    # Local dev server only. Root is used for writable project bind storage;
+    # a production Temporal deployment uses its supported persistence backend.
+    user: "0:0"
+    restart: unless-stopped
+    logging: *logging
+    command:
+      - server
+      - start-dev
+      - --ip
+      - 0.0.0.0
+      - --namespace
+      - imager
+      - --db-filename
+      - /data/temporal.db
+    volumes:
+      - type: bind
+        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/temporal
+        target: /data
+    # No host UI/gRPC ports: UI is reachable only through authenticated nginx.
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  temporal-ui:
+    image: nginx:1.28.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      temporal:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_PORT:-8088}:8080"
+    volumes:
+      - ./nginx/temporal-ui.conf:/etc/nginx/conf.d/default.conf:ro
+    secrets:
+      - temporal_ui_htpasswd
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  imager-dispatcher:
+    <<: *core
+    command: ["python", "-m", "src.presentation.temporal.dispatcher"]
+    mem_limit: 256000000
+
+  imager-worker:
+    <<: *core
+    command: ["python", "-m", "src.presentation.temporal.worker"]
+    # One container = one Activity slot = one active image. No container_name,
+    # so --scale imager-worker=2 creates another independently bounded worker.
+    mem_limit: 1000000000
+    volumes:
+      # Only unique TemporaryDirectory attempt scratch, never persistent image
+      # references. Files are removed on normal completion; no shared-path API.
+      - type: bind
+        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/scratch
+        target: /tmp
+
+  telegram-bot:
+    profiles: ["bot"]
+    image: imager-temporal/bot:local
+    build:
+      context: ..
+      dockerfile: telegram_bot/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    environment:
+      API_TOKEN: ${API_TOKEN:-}
+      TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
+      MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
+      DATABASE_NAME: telegram_bot
+      IMAGER_DATABASE_NAME: imager_core
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+      MINIO_BUCKET: imager
+      MINIO_SECURE: "false"
+      TMPDIR: /tmp
+    volumes:
+      - type: bind
+        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/bot-scratch
+        target: /tmp
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  import-catalog:
+    <<: *core
+    profiles: ["tools"]
+    restart: "no"
+    command: ["python", "-m", "src.presentation.cli.catalog_cli", "/imports"]
+    volumes:
+      - ${IMAGER_IMPORT_ROOT:-../imager/files/groups}:/imports:ro
+
+secrets:
+  temporal_ui_htpasswd:
+    file: ${IMAGER_SECRETS_ROOT:?Run infra/setup.py}/temporal-ui.htpasswd

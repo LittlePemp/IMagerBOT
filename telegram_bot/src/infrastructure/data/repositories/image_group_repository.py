@@ -34,8 +34,7 @@ class ImageGroupRepository:
                     {'imager_name': group.group},
                     {'$set': {
                         'count': group.count,
-                        'last_synced': datetime.now(settings.tzinfo),
-                        'status': GroupStatus.ACTIVE
+                        'last_synced': datetime.now(settings.tzinfo)
                     }}
                 )
             else:
