@@ -9,9 +9,6 @@ class GetImageDataQuery(IQuery):
 
 
 class GetImageDataQueryHandler(IQueryHandler):
-    def __init__(self):
-        self.uow = get_uow()
-
     def handle(self, query: GetImageDataQuery):
-        file_repository = self.uow.file_repository
+        file_repository = get_uow().file_repository
         return file_repository.read_image_file(query.image_path)

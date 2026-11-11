@@ -1,12 +1,10 @@
 import os
 
 from settings import settings
-from src.application.image_builder.interfaces_cqrs import (ICommand,
-                                                           ICommandHandler)
+from src.application.image_builder.interfaces_cqrs import ICommand, ICommandHandler
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
+from src.shared_kernel.loggers import application_logger
 from src.shared_kernel.result import Result
-
-from ..errors.commands_errors import CommandsErrorMessages
 
 
 class ValidateImagesDataCommand(ICommand):
@@ -15,33 +13,40 @@ class ValidateImagesDataCommand(ICommand):
 
 
 class ValidateImagesDataCommandHandler(ICommandHandler):
+    @staticmethod
+    def _path_key(path):
+        return os.path.normcase(os.path.realpath(path))
+
     def handle(self, command: ValidateImagesDataCommand) -> Result:
         try:
+            if not isinstance(command.group_name, str) or not command.group_name.strip():
+                raise ValueError('Image group must be a non-empty string')
+            root = os.path.realpath(settings.image_groups_relative_path)
+            directory = os.path.realpath(os.path.join(root, command.group_name))
+            if directory == root or os.path.commonpath([root, directory]) != root:
+                raise ValueError('Image group must be inside the configured library root')
             with get_uow() as uow:
-                file_repository = uow.file_repository
-                cell_repository = uow.cell_repository
-
-                image_files = self._get_image_files(file_repository, command.group_name)
-                db_image_files = self._get_db_image_files(cell_repository)
-
-                missing_in_db = image_files - db_image_files
-                if missing_in_db:
-                    return CommandsErrorMessages.images_missing_in_database(missing_in_db)
-
-                missing_on_disk = db_image_files - image_files
-                if missing_on_disk:
-                    return CommandsErrorMessages.images_missing_on_disk(missing_on_disk)
-
-                return Result.Success(f'All images in {command.group_name} are validated successfully')
-        except Exception as e:
-            return CommandsErrorMessages.general_error(e)
-
-    def _get_image_files(self, file_repository, group_name: str) -> set:
-        directory = os.path.join(settings.image_groups_relative_path, group_name)
-        return set(file_repository.list_image_files(directory))
-
-    def _get_db_image_files(self, cell_repository) -> set:
-        return set(
-            cell.relative_file_path
-            for cell in cell_repository.mongo_repository.filter()
-        )
+                files = uow.file_repository.list_image_files(directory)
+                if not files.is_success:
+                    application_logger.error(str(files.error))
+                    return files
+                disk_paths = {self._path_key(path) for path in files.value}
+                records = uow.cell_repository.mongo_collection.find(
+                    {'group': command.group_name}, {'relative_file_path': 1},
+                )
+                database_paths = {
+                    self._path_key(uow.file_repository.resolve_image_path(record['relative_file_path']))
+                    for record in records
+                }
+                missing_in_database = disk_paths - database_paths
+                missing_on_disk = database_paths - disk_paths
+                if missing_in_database or missing_on_disk:
+                    message = (f'Catalog mismatch for {command.group_name}: '
+                               f'missing_in_database={sorted(missing_in_database)}; '
+                               f'missing_on_disk={sorted(missing_on_disk)}')
+                    application_logger.error(message)
+                    return Result.Error(message)
+            return Result.Success(f'Files and database agree for group {command.group_name}')
+        except Exception as exc:
+            application_logger.exception(f'Cannot validate catalog: {exc}')
+            return Result.Error(f'Cannot validate catalog: {exc}')

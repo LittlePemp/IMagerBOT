@@ -1,6 +1,8 @@
 import asyncio
+import uuid
 
 from fastapi import APIRouter, HTTPException
+from settings import settings
 from src.application.image_builder.commands.load_missing_groups import \
     LoadMissingGroupsCommand
 from src.application.image_builder.mediator import mediator
@@ -11,15 +13,18 @@ from src.presentation.api.schemas import (GenerateImageRequest,
                                           ListGroupsResponse,
                                           SyncGroupsResponse)
 from src.shared_kernel.loggers import presentation_logger
+from src.presentation.api.workers import accepting_requests, generation_queue
 
 router = APIRouter()
 
-queue = asyncio.Queue()
-
 @router.post("/v1/generate-image", response_model=GenerateImageResponse)
 async def generate_image(request: GenerateImageRequest):
-    future = asyncio.Future()
-    await queue.put({
+    if not accepting_requests():
+        raise HTTPException(status_code=503, detail='Generator is not accepting requests')
+    queue = generation_queue()
+    future = asyncio.get_running_loop().create_future()
+    request_id = str(uuid.uuid4())
+    item = {
         'image_path': request.image_path,
         'group_name': request.group_name,
         'insertion_format': request.insertion_format,
@@ -28,9 +33,28 @@ async def generate_image(request: GenerateImageRequest):
         'cell_size': request.cell_size,
         'result_size': request.result_size,
         'output_name': request.output_name,
-        'future': future
-    })
-    return await future
+        'future': future,
+        'request_id': request_id,
+    }
+    try:
+        queue.put_nowait(item)
+    except asyncio.QueueFull:
+        raise HTTPException(status_code=429, detail='Generation queue is full; try again later')
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(future),
+            timeout=getattr(settings, 'api_request_timeout_seconds', 600),
+        )
+    except asyncio.TimeoutError:
+        future.cancel()
+        presentation_logger.warning(f'HTTP generation wait timed out: request_id={request_id}')
+        raise HTTPException(
+            status_code=504,
+            detail='Generation wait timed out; a calculation already started may still complete',
+        )
+    except asyncio.CancelledError:
+        future.cancel()
+        raise
 
 @router.get("/v1/list-groups", response_model=ListGroupsResponse)
 async def list_groups():

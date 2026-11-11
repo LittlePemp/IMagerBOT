@@ -51,12 +51,20 @@ class EntitiesErrorMessages:
         return Result.Error('Cell size must be greater than 0')
 
     @staticmethod
+    def cell_size_exceeds_limit(limit):
+        return Result.Error(f'Cell size must be at most {limit}')
+
+    @staticmethod
     def result_size_must_be_an_integer():
         return Result.Error('Result size must be an integer')
 
     @staticmethod
     def result_size_must_be_greater_than_zero():
         return Result.Error('Result size must be greater than 0')
+
+    @staticmethod
+    def result_size_exceeds_limit(limit):
+        return Result.Error(f'Result size must be at most {limit}')
 
     @staticmethod
     def image_group_must_be_a_string():

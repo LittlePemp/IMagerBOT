@@ -10,7 +10,8 @@ class Result:
 
     @classmethod
     def Error(cls, error):
-        return cls(error=error)
+        # Error(None) must never become a successful result.
+        return cls(error=error if error is not None else 'Unspecified error')
 
     def __repr__(self):
         if self.is_success:

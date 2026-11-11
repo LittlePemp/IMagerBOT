@@ -1,7 +1,8 @@
 import os
+import math
 from typing import List, Tuple
 
-from pydantic import ConfigDict, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -15,10 +16,16 @@ class Settings(BaseSettings):
     uploaded_images_path: str = 'files/uploaded'
     generated_images_path: str = 'files/generated'
     generated_image_extension: str = 'jpg'
-    generated_image_jpeg_quality: int = 90
-    telegram_max_document_size_bytes: int = 47185920
-    generation_estimated_jpeg_bytes_per_pixel: float = 1.0
-    rabbitmq_prefetch_count: int = 1
+    generated_image_jpeg_quality: int = Field(default=90, ge=1, le=100)
+    telegram_max_document_size_bytes: int = Field(default=47185920, gt=0)
+    generation_estimated_jpeg_bytes_per_pixel: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    rabbitmq_prefetch_count: int = Field(default=1, ge=1, le=8)
+    api_queue_maxsize: int = Field(default=8, ge=1, le=100)
+    api_request_timeout_seconds: float = Field(default=600, gt=0, le=3600)
+    api_shutdown_timeout_seconds: float = Field(default=30, gt=0, le=300)
+    rabbitmq_max_retries: int = Field(default=2, ge=0, le=5)
+    rpc_result_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
+    rpc_result_max_entries: int = Field(default=1000, ge=1, le=10000)
 
     # Image validation settings
     allowed_formats: List[str] = ['RGB', 'RGBA']
@@ -44,6 +51,21 @@ class Settings(BaseSettings):
         if not v or len(v) < 1:
             raise ValueError('There must be at least one allowed format')
         return v
+
+    @model_validator(mode='after')
+    def validate_image_policy(self):
+        if any(value <= 0 for value in (*self.min_size, *self.max_size)):
+            raise ValueError('Image dimensions must be positive')
+        if any(low > high for low, high in zip(self.min_size, self.max_size)):
+            raise ValueError('Minimum image dimensions must not exceed maximum dimensions')
+        if any(value > 4000 for value in self.max_size):
+            raise ValueError('Input image dimensions must fit the 4000 pixel decoder safety ceiling')
+        low, high = self.aspect_ratio_limits
+        if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
+            raise ValueError('Aspect ratio limits must be finite, positive and ordered')
+        if self.generated_image_extension.lower().lstrip('.') not in ('jpg', 'jpeg', 'png'):
+            raise ValueError('Output format must be jpg, jpeg or png')
+        return self
 
     def create_directories(self) -> None:
         if not self._directories_created:

@@ -3,6 +3,14 @@ from src.shared_kernel.result import Result
 
 class ImageServiceErrorMessages:
     @staticmethod
+    def failed_to_normalize_image(error_message: str):
+        return Result.Error(f'Failed to normalize image: {error_message}')
+
+    @staticmethod
+    def invalid_image(error_message: str):
+        return Result.Error(f'Invalid image: {error_message}')
+
+    @staticmethod
     def failed_to_calculate_average_color(error_message: str):
         return Result.Error(f'Failed to calculate average color: {error_message}')
 

@@ -1,51 +1,68 @@
+from threading import RLock, local
+
 from pymongo import MongoClient
-from pymongo.client_session import ClientSession
 from settings import settings
+from src.shared_kernel.resource_limits import generation_slot
 
 from .repositories.cell_repository import CellRepository
 from .repositories.file_repository import FileRepository
 
 
 class MongoUnitOfWork:
+    """Shared client/catalog with serialized, idempotent maintenance operations.
+
+    Files and cache do not participate in Mongo transactions. Individual upserts
+    are atomic; partial synchronization reports failure and refreshes the cache.
+    """
+
     _instance = None
+    _instance_lock = RLock()
 
     def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(MongoUnitOfWork, cls).__new__(cls)
-            cls._instance._initialized = False
-            cls._instance._initialize(*args, **kwargs)
+        if cls._instance is not None:
+            return cls._instance
+        with generation_slot(), cls._instance_lock:
+            if cls._instance is None:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                instance._initialize(*args, **kwargs)
+                cls._instance = instance
         return cls._instance
 
     def _initialize(self, client: MongoClient = None):
-        self.client = client or MongoClient(settings.mongodb_uri)
-        self.session: ClientSession = None
+        self.client = client if client is not None else MongoClient(settings.mongodb_uri)
+        self._maintenance_lock = RLock()
+        self._contexts = local()
         self.file_repository = FileRepository()
         self.cell_repository = CellRepository(
-            self.client[settings.database_name].cell_configurations,
-            self.file_repository
+            self.client[settings.database_name].cell_configurations, self.file_repository
         )
         self.repositories_to_init = [self.cell_repository]
-
-        if not self._initialized:
-            self.initialize_repositories()
-            self._initialized = True
+        self.initialize_repositories()
+        self._initialized = True
 
     def __enter__(self):
-        self.session = self.client.start_session()
-        self.session.start_transaction()
+        slot = generation_slot()
+        slot.__enter__()
+        try:
+            self._maintenance_lock.acquire()
+            if not hasattr(self._contexts, 'slots'):
+                self._contexts.slots = []
+            self._contexts.slots.append(slot)
+        except BaseException:
+            slot.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            self.session.commit_transaction()
-        else:
-            self.session.abort_transaction()
-        self.session.end_session()
+        try:
+            self._maintenance_lock.release()
+        finally:
+            self._contexts.slots.pop().__exit__(exc_type, exc_val, exc_tb)
 
     def initialize_repositories(self):
-        for repo in self.repositories_to_init:
-            # if hasattr(repo, 'initialize'):
-            repo.initialize()
+        for repository in self.repositories_to_init:
+            repository.initialize()
 
 
 def get_uow():

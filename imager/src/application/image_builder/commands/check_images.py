@@ -4,6 +4,7 @@ from settings import settings
 from src.infrastructure.data.image_builder.unit_of_work import get_uow
 from src.shared_kernel.loggers import application_logger, exception_logger
 from src.shared_kernel.result import Result
+from src.domain.image_builder.services.image_service import ImageService
 from tqdm import tqdm
 
 from ..errors.commands_errors import CommandsErrorMessages
@@ -16,24 +17,31 @@ class CheckImagesCommand(ICommand):
 
 
 class CheckImagesCommandHandler(ICommandHandler):
-    def __init__(self):
-        self.uow = get_uow()
-        self.file_repository = self.uow.file_repository
-
     def handle(self, command: CheckImagesCommand) -> Result:
         application_logger.info(f'Starting to check images in group {command.group_name}')
         try:
-            with self.uow:
+            with get_uow() as uow:
+                file_repository = uow.file_repository
                 directory = os.path.join(settings.image_groups_relative_path, command.group_name)
-                image_files = self.file_repository.list_image_files(directory)
+                root = os.path.realpath(settings.image_groups_relative_path)
+                if os.path.commonpath([root, os.path.realpath(directory)]) != root:
+                    raise ValueError('Image group must be inside the configured library root')
+                image_files = file_repository.list_image_files(directory)
+                if not image_files.is_success:
+                    application_logger.error(str(image_files.error))
+                    return image_files
 
-                for image_file in tqdm(image_files, desc='Checking images', unit='image'):
-                    image_result = self.file_repository.read_image_file(image_file)
+                for image_file in tqdm(image_files.value, desc='Checking images', unit='image'):
+                    image_result = file_repository.read_image_file(image_file)
                     if not image_result.is_success:
                         application_logger.error(f'Failed to read image: {image_file}')
                         return CommandsErrorMessages.failed_to_read_image(image_file, image_result.error)
 
-                    image = image_result.value
+                    normalized = ImageService.normalize_image(image_result.value)
+                    if not normalized.is_success:
+                        application_logger.error(str(normalized.error))
+                        return normalized
+                    image = normalized.value
                     if not self.validate_image_size(image, image_file):
                         application_logger.warning(f'Image size out of bounds: {image_file}')
                         return CommandsErrorMessages.image_size_out_of_bounds(
@@ -69,4 +77,5 @@ class CheckImagesCommandHandler(ICommandHandler):
 
     def validate_image_format(self, image, _):
         channels = image.shape[2] if len(image.shape) == 3 else 1
-        return channels in [3, 4] and (channels != 4 or 'A' in settings.allowed_formats)
+        return ((channels == 3 and 'RGB' in settings.allowed_formats)
+                or (channels == 4 and 'RGBA' in settings.allowed_formats))

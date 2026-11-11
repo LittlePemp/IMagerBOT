@@ -28,7 +28,7 @@ class AlphaChannel:
 
     @staticmethod
     def create(value) -> Result:
-        if not isinstance(value, int):
+        if type(value) is not int:
             return EntitiesErrorMessages.alpha_channel_must_be_an_integer()
         if not (0 <= value <= 100):
             return EntitiesErrorMessages.alpha_channel_must_be_in_range()
@@ -47,7 +47,7 @@ class NoiseLevel:
 
     @staticmethod
     def create(value) -> Result:
-        if not isinstance(value, int):
+        if type(value) is not int:
             return EntitiesErrorMessages.noise_level_must_be_an_integer()
         if not (0 <= value <= 100):
             return EntitiesErrorMessages.noise_level_must_be_in_range()
@@ -61,15 +61,19 @@ class NoiseLevel:
 
 
 class CellSize:
+    MAX_VALUE = 2000
+
     def __init__(self, value):
         self.value = value
 
     @staticmethod
     def create(value) -> Result:
-        if not isinstance(value, int):
+        if type(value) is not int:
             return EntitiesErrorMessages.cell_size_must_be_an_integer()
         if value <= 0:
             return EntitiesErrorMessages.cell_size_must_be_greater_than_zero()
+        if value > CellSize.MAX_VALUE:
+            return EntitiesErrorMessages.cell_size_exceeds_limit(CellSize.MAX_VALUE)
         return Result.Success(CellSize(value))
 
     def __int__(self):
@@ -80,15 +84,19 @@ class CellSize:
 
 
 class ResultSize:
+    MAX_VALUE = 1000
+
     def __init__(self, value):
         self.value = value
 
     @staticmethod
     def create(value) -> Result:
-        if not isinstance(value, int):
+        if type(value) is not int:
             return EntitiesErrorMessages.result_size_must_be_an_integer()
         if value <= 0:
             return EntitiesErrorMessages.result_size_must_be_greater_than_zero()  # noqa
+        if value > ResultSize.MAX_VALUE:
+            return EntitiesErrorMessages.result_size_exceeds_limit(ResultSize.MAX_VALUE)
         return Result.Success(ResultSize(value))
 
     def __int__(self):
@@ -106,7 +114,7 @@ class ImageGroup:
     def create(value) -> Result:
         if not isinstance(value, str):
             return EntitiesErrorMessages.image_group_must_be_a_string()
-        if not value:
+        if not value.strip():
             return EntitiesErrorMessages.image_group_cannot_be_empty()
         return Result.Success(ImageGroup(value))
 

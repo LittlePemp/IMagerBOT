@@ -1,80 +1,60 @@
 import unittest
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 from unittest.mock import MagicMock, patch
 
-from settings import settings
-from src.infrastructure.data.image_builder.repositories.cell_repository import \
-    CellRepository
-from src.infrastructure.data.image_builder.repositories.file_repository import \
-    FileRepository
-from src.infrastructure.data.image_builder.unit_of_work import (
-    MongoClient, MongoUnitOfWork, get_uow)
+from src.infrastructure.data.image_builder.unit_of_work import MongoUnitOfWork, get_uow
 
 
 class TestMongoUnitOfWork(unittest.TestCase):
-
     def setUp(self):
         MongoUnitOfWork._instance = None
+        self.addCleanup(setattr, MongoUnitOfWork, '_instance', None)
+        self.repository_patch = patch('src.infrastructure.data.image_builder.unit_of_work.CellRepository')
+        self.repository_patch.start()
+        self.addCleanup(self.repository_patch.stop)
+        self.client = MagicMock()
 
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    def test_singleton_instance(self, mock_mongo_client):
-        uow1 = MongoUnitOfWork(client=mock_mongo_client.return_value)
-        uow2 = MongoUnitOfWork(client=mock_mongo_client.return_value)
-        self.assertIs(uow1, uow2, 'MongoUnitOfWork не является синглтоном')
+    def test_singleton_shares_client_and_initializes_once(self):
+        first = MongoUnitOfWork(client=self.client)
+        second = MongoUnitOfWork(client=MagicMock())
+        self.assertIs(first, second)
+        self.assertIs(first.client, self.client)
+        first.cell_repository.initialize.assert_called_once()
 
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    @patch.object(MongoUnitOfWork, '_initialize', MagicMock())
-    def test_initialize_called_once(self, mock_mongo_client):
-        MongoUnitOfWork(client=mock_mongo_client.return_value)
-        MongoUnitOfWork._initialize.assert_called_once()
-
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository.__new__')
-    def test_repository_initialization(self, mock_cell_repo_new, mock_mongo_client):
-        mock_cell_repo_new.return_value = CellRepository.__new__(CellRepository)
-
-        CellRepository._instance = None
-
-        uow = MongoUnitOfWork(client=mock_mongo_client.return_value)
-
-        self.assertTrue(mock_cell_repo_new.called, 'CellRepository не был вызван')
-
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    def test_session_management(self, mock_mongo_client):
-        mock_session = MagicMock()
-        mock_mongo_client.return_value.start_session.return_value = mock_session
-
-        with MongoUnitOfWork(client=mock_mongo_client.return_value) as uow:
-            mock_session.start_transaction.assert_called_once()
-
-        mock_session.commit_transaction.assert_called_once()
-        mock_session.end_session.assert_called_once()
-
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    def test_initialize_repositories(self, mock_mongo_client):
-        mock_repo = MagicMock()
-        mock_repo.initialize = MagicMock()
-        uow = MongoUnitOfWork(client=mock_mongo_client.return_value)
-        uow.repositories_to_init = [mock_repo]
-
-        uow.initialize_repositories()
-
-        mock_repo.initialize.assert_called_once()
-
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    def test_exit_with_exception(self, mock_mongo_client):
-        mock_session = MagicMock()
-        mock_mongo_client.return_value.start_session.return_value = mock_session
-
-        try:
-            with MongoUnitOfWork(client=mock_mongo_client.return_value):
-                raise Exception('Test Exception')
-        except Exception:
+    def test_context_does_not_claim_unused_mongo_transaction(self):
+        with MongoUnitOfWork(client=self.client):
             pass
+        self.client.start_session.assert_not_called()
 
-        mock_session.abort_transaction.assert_called_once()
-        mock_session.end_session.assert_called_once()
+    def test_context_releases_lock_after_error_and_allows_nested_use(self):
+        instance = MongoUnitOfWork(client=self.client)
+        with self.assertRaisesRegex(RuntimeError, 'failure'):
+            with instance:
+                raise RuntimeError('failure')
+        with instance:
+            with instance:
+                self.assertIs(get_uow(), instance)
 
-    @patch('src.infrastructure.data.image_builder.unit_of_work.MongoClient')
-    def test_get_uow(self, mock_mongo_client):
-        uow = get_uow()
-        self.assertIsInstance(uow, MongoUnitOfWork, 'get_uow не возвращает экземпляр MongoUnitOfWork')
+    def test_concurrent_contexts_are_serialized(self):
+        instance = MongoUnitOfWork(client=self.client)
+        barrier, lock = Barrier(2), Lock()
+        active = peak = 0
+
+        def operation():
+            nonlocal active, peak
+            barrier.wait(timeout=2)
+            with instance:
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.01)
+                with lock:
+                    active -= 1
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(operation) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=3)
+        self.assertEqual(peak, 1)

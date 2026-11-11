@@ -1,104 +1,83 @@
 import os
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cv2
 import numpy as np
-from src.infrastructure.data.image_builder.repositories.file_repository import \
-    FileRepository
+from src.infrastructure.data.image_builder.repositories.file_repository import FileRepository
 
 
 class TestFileRepository(unittest.TestCase):
-
     def setUp(self):
-        self.file_repository = FileRepository()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = self.temporary.name
+        self.repository = FileRepository()
+        self.repository.settings = SimpleNamespace(
+            file_path_prefix='', generated_images_path=self.root,
+            image_groups_relative_path=self.root, min_size=(20, 20), max_size=(4000, 4000),
+        )
+        self.image = np.full((20, 30, 3), 125, dtype=np.uint8)
 
-    @patch('cv2.imread')
-    def test_read_image_file_success(self, mock_imread):
-        mock_image = np.zeros((10, 10, 3), dtype=np.uint8)
-        mock_imread.return_value = mock_image
-        relative_path = 'path/to/image.png'
+    def test_real_image_roundtrip_and_atomic_publish(self):
+        destination = os.path.join(self.root, 'result.png')
+        self.assertTrue(self.repository.save_image_file(self.image, destination).is_success)
+        result = self.repository.read_image_file(destination)
+        self.assertTrue(result.is_success, result.error)
+        np.testing.assert_array_equal(result.value, self.image)
+        self.assertEqual(os.listdir(self.root), ['result.png'])
 
-        result = self.file_repository.read_image_file(relative_path)
-
-        self.assertTrue(result.is_success)
-        self.assertEqual(result.value.shape, mock_image.shape)
-        mock_imread.assert_called_once_with(relative_path,
-                                            cv2.IMREAD_UNCHANGED)
-
-    @patch('cv2.imread')
-    def test_read_image_file_not_found(self, mock_imread):
-        mock_imread.return_value = None
-        relative_path = 'path/to/image.png'
-
-        result = self.file_repository.read_image_file(relative_path)
-
+    def test_encoder_false_is_failure_and_does_not_replace_previous_result(self):
+        destination = os.path.join(self.root, 'result.png')
+        with open(destination, 'wb') as stream:
+            stream.write(b'previous-result')
+        with patch('cv2.imwrite', return_value=False):
+            result = self.repository.save_image_file(self.image, destination)
         self.assertFalse(result.is_success)
-        self.assertEqual(result.error, f'Image not found at path: {relative_path}')
-        mock_imread.assert_called_once_with(relative_path,
-                                            cv2.IMREAD_UNCHANGED)
+        with open(destination, 'rb') as stream:
+            self.assertEqual(stream.read(), b'previous-result')
+        self.assertEqual(os.listdir(self.root), ['result.png'])
 
-    @patch('cv2.imwrite')
-    @patch('loguru.logger.info')
-    def test_save_image_file_success(self, mock_logger_info, mock_imwrite):
-        mock_image = np.zeros((10, 10, 3), dtype=np.uint8)
-        relative_path = 'path/to/image.png'
-        mock_imwrite.return_value = True
-
-        result = self.file_repository.save_image_file(mock_image,
-                                                      relative_path)
-
-        self.assertTrue(result.is_success)
-        mock_imwrite.assert_called_once_with(relative_path, mock_image)
-
-    @patch('cv2.imwrite')
-    @patch('loguru.logger.error')
-    def test_save_image_file_error(self, mock_logger_error, mock_imwrite):
-        mock_image = np.zeros((10, 10, 3), dtype=np.uint8)
-        relative_path = 'path/to/image.png'
-        mock_imwrite.side_effect = Exception('Cannot write image')
-
-        result = self.file_repository.save_image_file(mock_image,
-                                                      relative_path)
-
+    def test_encoder_exception_removes_temporary_file(self):
+        destination = os.path.join(self.root, 'result.png')
+        with patch('cv2.imwrite', side_effect=OSError('disk full')):
+            result = self.repository.save_image_file(self.image, destination)
         self.assertFalse(result.is_success)
-        self.assertTrue('Cannot' in str(result.error))
-        mock_imwrite.assert_called_once_with(relative_path, mock_image)
+        self.assertEqual(os.listdir(self.root), [])
 
-    @patch('os.listdir')
-    def test_list_image_files(self, mock_listdir):
-        mock_listdir.return_value = ['image1.png',
-                                     'image2.jpg',
-                                     'document.txt']
-        directory_path = 'path/to/directory'
+    def test_save_rejects_path_outside_generated_root(self):
+        destination = os.path.join(self.root, '..', 'outside.png')
+        with patch('cv2.imwrite') as writer:
+            result = self.repository.save_image_file(self.image, destination)
+        self.assertFalse(result.is_success)
+        writer.assert_not_called()
 
-        result = self.file_repository.list_image_files(directory_path)
+    def test_missing_file_is_rejected_before_decoder(self):
+        with patch('cv2.imread') as reader:
+            result = self.repository.read_image_file(os.path.join(self.root, 'absent.png'))
+        self.assertFalse(result.is_success)
+        reader.assert_not_called()
 
-        expected_result = [
-            os.path.join(directory_path, 'image1.png'),
-            os.path.join(directory_path, 'image2.jpg')
-        ]
-        self.assertEqual(len(result.value), 2)
-        self.assertIn(expected_result[0], result.value)
-        self.assertIn(expected_result[1], result.value)
-        self.assertNotIn(os.path.join(directory_path, 'document.txt'), result.value)
-        mock_listdir.assert_called_once_with(directory_path)
+    def test_corrupt_file_is_rejected(self):
+        path = os.path.join(self.root, 'bad.png')
+        with open(path, 'wb') as stream:
+            stream.write(b'not an image')
+        self.assertFalse(self.repository.read_image_file(path).is_success)
 
-    @patch('os.remove')
-    @patch('loguru.logger.info')
-    def test_delete_image_file_success(self, mock_logger_info, mock_remove):
-        relative_path = 'path/to/image.png'
+    def test_encoded_size_limit_is_checked_before_decoder(self):
+        path = os.path.join(self.root, 'image.png')
+        cv2.imwrite(path, self.image)
+        with patch('src.infrastructure.data.image_builder.repositories.file_repository.MAX_SOURCE_FILE_BYTES', 1):
+            with patch('cv2.imread') as reader:
+                result = self.repository.read_image_file(path)
+        self.assertFalse(result.is_success)
+        reader.assert_not_called()
 
-        self.file_repository.delete_image_file(relative_path)
-
-        mock_remove.assert_called_once_with(relative_path)
-
-    @patch('os.remove')
-    @patch('loguru.logger.error')
-    def test_delete_image_file_error(self, mock_logger_error, mock_remove):
-        relative_path = 'path/to/image.png'
-        mock_remove.side_effect = Exception('Error deleting file')
-
-        self.file_repository.delete_image_file(relative_path)
-
-        mock_remove.assert_called_once_with(relative_path)
+    def test_list_skips_image_named_directory(self):
+        cv2.imwrite(os.path.join(self.root, 'image.png'), self.image)
+        os.mkdir(os.path.join(self.root, 'folder.jpg'))
+        result = self.repository.list_image_files(self.root)
+        self.assertTrue(result.is_success)
+        self.assertEqual(result.value, [os.path.join(self.root, 'image.png')])

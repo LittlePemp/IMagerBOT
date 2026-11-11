@@ -1,4 +1,11 @@
 import os
+import tempfile
+
+from src.shared_kernel.resource_limits import (
+    MAX_SOURCE_FILE_BYTES, configure_decoder_limits, require_memory,
+)
+
+configure_decoder_limits()
 
 import cv2
 import numpy as np
@@ -44,36 +51,68 @@ class FileRepository:
         return normalized_path
 
     def read_image_file(self, relative_path: str) -> Result:
-        resolved_path = self.resolve_image_path(relative_path)
-        if not os.path.isfile(resolved_path):
-            return Result.Error(f'Image not found at path: {relative_path}')
-
-        image = cv2.imread(resolved_path, cv2.IMREAD_UNCHANGED)
-        if image is None:
-            return Result.Error(f'Image not found at path: {resolved_path}')
-        return Result.Success(image)
+        try:
+            resolved_path = self.resolve_image_path(relative_path)
+            if not os.path.isfile(resolved_path):
+                raise ValueError(f'Image not found at path: {relative_path}')
+            if os.path.getsize(resolved_path) > MAX_SOURCE_FILE_BYTES:
+                raise ValueError(f'Encoded image exceeds {MAX_SOURCE_FILE_BYTES} bytes: {resolved_path}')
+            # Worst supported uint16 BGRA source plus its uint8 normalization.
+            require_memory(256_000_000)
+            image = cv2.imread(resolved_path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                raise ValueError(f'Cannot decode image: {resolved_path}')
+            validation = self.image_service.validate_image(
+                image, min_size=self.settings.min_size, max_size=self.settings.max_size,
+            )
+            if not validation.is_success:
+                raise ValueError(str(validation.error))
+            return Result.Success(image)
+        except Exception as exc:
+            db_logger.error(f'Cannot read image {relative_path}: {exc}')
+            return Result.Error(str(exc))
 
     def save_image_file(self, image: np.ndarray, relative_path: str, save_params=None) -> Result:
+        temporary_path = None
         try:
+            destination = os.path.realpath(relative_path)
+            root = os.path.realpath(os.path.join(self.settings.file_path_prefix, self.settings.generated_images_path))
+            if os.path.commonpath([root, destination]) != root:
+                raise ValueError('Output image must be inside the generated images directory')
+            os.makedirs(root, exist_ok=True)
+            descriptor, temporary_path = tempfile.mkstemp(
+                prefix='.imager-', suffix=os.path.splitext(destination)[1], dir=os.path.dirname(destination)
+            )
+            os.close(descriptor)
             if save_params is None:
-                cv2.imwrite(relative_path, image)
+                written = cv2.imwrite(temporary_path, image)
             else:
-                cv2.imwrite(relative_path, image, save_params)
+                written = cv2.imwrite(temporary_path, image, save_params)
+            if not written or os.path.getsize(temporary_path) == 0:
+                raise OSError('Image encoder failed to write the result')
+            os.replace(temporary_path, destination)
+            temporary_path = None
             db_logger.info(f'Image saved at {relative_path}')
             return Result.Success('Image successfully saved')
         except Exception as e:
             db_logger.error(f'Cannot write image at {relative_path}: {str(e)}')
             return Result.Error(f'Cannot write image at {relative_path}: {str(e)}')
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.remove(temporary_path)
+                except OSError as exc:
+                    db_logger.warning(f'Cannot remove temporary result {temporary_path}: {exc}')
 
     def list_image_files(self, directory_path: str) -> Result:
         try:
-            supported_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff')
+            supported_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif')
             files = [
                 os.path.join(directory_path, f)
                 for f in os.listdir(directory_path)
-                if f.lower().endswith(supported_extensions)
+                if f.lower().endswith(supported_extensions) and os.path.isfile(os.path.join(directory_path, f))
             ]
-            return Result.Success(files)
+            return Result.Success(sorted(files))
         except Exception as e:
             db_logger.error(f'Error listing image files in directory {directory_path}: {str(e)}')
             return Result.Error(f'Error listing image files in directory {directory_path}: {str(e)}')

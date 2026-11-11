@@ -15,7 +15,7 @@ class TestGenerateImageCommandHandler(unittest.TestCase):
             insertion_format='crop',
             alpha_channel=50,
             noise_level=10,
-            cell_size=60,
+            cell_size=40,
             result_size=120,
             group_name='test_group'
         )
@@ -43,7 +43,7 @@ class TestGenerateImageCommandHandler(unittest.TestCase):
         result = self.handler.handle(self.command)
 
         self.assertFalse(result.is_success)
-        self.assertIn('An error occurred', result.error)
+        self.assertIn('Test exception', result.error)
 
     @patch('src.application.image_builder.commands.generate_image.get_uow')
     def test_handle_invalid_insertion_format(self, mock_get_uow):
@@ -52,7 +52,7 @@ class TestGenerateImageCommandHandler(unittest.TestCase):
             insertion_format='invalid_format',
             alpha_channel=50,
             noise_level=10,
-            cell_size=60,
+            cell_size=40,
             result_size=120,
             group_name='test_group'
         )

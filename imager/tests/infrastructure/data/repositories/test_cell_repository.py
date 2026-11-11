@@ -1,129 +1,138 @@
+import os
+import tempfile
 import unittest
-from collections import defaultdict
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from src.domain.image_builder.aggregates.cell import Cell
-from src.domain.image_builder.entities.cell_object import CellObject
-from src.domain.image_builder.value_objects.cell_rgb import (CellRgb,
-                                                             ColorDefinition)
-from src.infrastructure.data.image_builder.repositories.cell_repository import \
-    CellRepository
-from src.shared_kernel.result import Result
+import cv2
+import numpy as np
+from src.infrastructure.data.image_builder.repositories.cell_repository import CellRepository
+from src.infrastructure.data.image_builder.repositories.file_repository import FileRepository
+
+
+class MemoryCollection:
+    def __init__(self):
+        self.documents = []
+        self.indexes = []
+        self.next_id = 1
+
+    def find(self, query, projection=None):
+        return [dict(document) for document in self.documents
+                if all(document.get(key) == value for key, value in query.items())]
+
+    def update_one(self, query, changes, upsert=False):
+        matches = [document for document in self.documents
+                   if all(document.get(key) == value for key, value in query.items())]
+        if matches:
+            matches[0].update(changes['$set'])
+        elif upsert:
+            self.documents.append({'_id': self.next_id, **changes['$set']})
+            self.next_id += 1
+
+    def delete_one(self, query):
+        for index, document in enumerate(self.documents):
+            if all(document.get(key) == value for key, value in query.items()):
+                del self.documents[index]
+                break
+
+    def create_index(self, name, unique=False):
+        self.indexes.append((name, unique))
 
 
 class TestCellRepository(unittest.TestCase):
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.FileRepository')
-    @patch('pymongo.collection.Collection')
-    def setUp(self, mock_mongo_collection, mock_file_repo):
-        self.mock_file_repo = mock_file_repo
-        self.mock_mongo_collection = mock_mongo_collection
-        if CellRepository._instance:
-            CellRepository._instance = None
-        self.cell_repository = CellRepository(mock_mongo_collection, mock_file_repo)
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = self.temporary.name
+        self.group = os.path.join(self.root, 'group')
+        os.mkdir(self.group)
+        self.files = FileRepository()
+        self.files.settings = SimpleNamespace(
+            image_groups_relative_path=self.root, min_size=(20, 20), max_size=(4000, 4000),
+        )
+        self.collection = MemoryCollection()
+        CellRepository._instance = None
+        self.addCleanup(setattr, CellRepository, '_instance', None)
+        self.repository = CellRepository(self.collection, self.files)
+        self.rss = patch('src.infrastructure.data.image_builder.repositories.cell_repository.current_rss_bytes', return_value=0)
+        self.rss.start()
+        self.addCleanup(self.rss.stop)
 
-    def test_initialization(self):
-        self.assertFalse(self.cell_repository._initialized)
-        self.assertIsInstance(self.cell_repository.mongo_collection, MagicMock)
-        self.assertIsInstance(self.cell_repository.file_repository, MagicMock)
-        self.assertIsInstance(self.cell_repository._data, defaultdict)
-        self.assertEqual(self.cell_repository._trees, {})
+    def write_image(self, name, color):
+        path = os.path.join(self.group, name)
+        cv2.imwrite(path, np.full((20, 20, 3), color, dtype=np.uint8))
+        return path
 
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository.load_data_from_mongo')
-    @patch('src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository.load_images')
-    @patch(
-        'src.infrastructure.data.image_builder.repositories.cell_repository.CellRepository._CellRepository__build_trees'
-    )
-    def test_initialize(self, mock_build_trees,
-                        mock_load_images,
-                        mock_load_data_from_mongo):
-        self.cell_repository.initialize()
-        mock_load_data_from_mongo.assert_called_once()
-        mock_load_images.assert_called_once()
-        mock_build_trees.assert_called_once()
-        self.assertTrue(self.cell_repository._initialized)
+    def test_singleton_preserved(self):
+        self.assertIs(self.repository, CellRepository(self.collection, self.files))
 
-    @patch('src.domain.image_builder.entities.cell_object.CellObject.create')
-    @patch('src.domain.image_builder.value_objects.cell_rgb.CellRgb.create')
-    def test_load_data_from_mongo(self,
-                                  mock_cell_rgb_create,
-                                  mock_cell_object_create):
-        mock_cell_rgb_create.side_effect = lambda r, g, b: Result.Success(
-            CellRgb(ColorDefinition(r), ColorDefinition(g), ColorDefinition(b)))
-        mock_cell_object_create.side_effect = lambda cell: Result.Success(
-            CellObject(cell, None))
+    def test_sync_add_replace_delete_and_deduplicate(self):
+        first = self.write_image('one.png', 30)
+        second = self.write_image('two.png', 90)
+        self.assertTrue(self.repository.load_missing_groups().is_success)
+        self.assertEqual(len(self.collection.documents), 2)
+        self.collection.documents.append({**self.collection.documents[0], '_id': 999})
+        self.write_image('one.png', 220)
+        stat = os.stat(first)
+        os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+        os.remove(second)
+        result = self.repository.load_missing_groups()
+        self.assertTrue(result.is_success, result.error)
+        self.assertEqual(len(self.collection.documents), 1)
+        self.assertEqual(self.collection.documents[0]['r'], 220)
+        self.assertEqual(self.repository.get_all_groups_info(), [{'group': 'group', 'count': 1}])
 
-        self.mock_mongo_collection.find.return_value = [
-            {'r': 255, 'g': 0, 'b': 0, 'group': 'group1', 'relative_file_path': 'path1'},
-            {'r': 0, 'g': 255, 'b': 0, 'group': 'group1', 'relative_file_path': 'path2'}
-        ]
+    def test_partial_sync_refreshes_cache_and_retry_retains_good_image(self):
+        path = self.write_image('good.png', 40)
+        bad = os.path.join(self.group, 'bad.png')
+        with open(bad, 'wb') as stream:
+            stream.write(b'broken')
+        self.assertFalse(self.repository.load_missing_groups().is_success)
+        self.assertEqual(len(self.collection.documents), 1)
+        self.assertIn(path, self.repository.data['group'])
+        os.remove(bad)
+        self.assertTrue(self.repository.load_missing_groups().is_success)
+        self.assertIsNotNone(self.repository.find_closest_cell((40, 40, 40), 'group'))
 
-        self.cell_repository.get_all_groups = MagicMock(return_value=['group1'])
+    def test_original_cache_is_bounded_and_metadata_does_not_pin_images(self):
+        self.write_image('one.png', 10)
+        self.write_image('two.png', 200)
+        with patch('src.infrastructure.data.image_builder.repositories.cell_repository.CACHE_LIMIT_BYTES', 1200):
+            self.assertTrue(self.repository.load_missing_groups().is_success)
+            for metadata in self.repository.data['group'].values():
+                self.assertIsNone(metadata.image)
+                self.assertTrue(self.repository.get_cell_image(metadata).is_success)
+                self.assertLessEqual(self.repository.cache_bytes, 1200)
+            self.assertEqual(len(self.repository._image_cache), 1)
 
-        self.cell_repository.load_data_from_mongo()
-
-        self.assertIn('group1', self.cell_repository._data)
-        self.assertEqual(len(self.cell_repository._data['group1']), 2)
-
-    @patch('src.domain.image_builder.entities.cell_object.CellObject.create')
-    def test_load_images(self, mock_cell_object_create):
-        cell_obj = CellObject(
-            Cell(
-                CellRgb(
-                    ColorDefinition(255),
-                    ColorDefinition(0),
-                    ColorDefinition(0)),
-                'group1', 'path1'), None)
-        self.cell_repository._data = {'group1': {'path1': cell_obj}}
-        self.mock_file_repo.read_image_file.return_value = Result.Success('image_data')
-        self.cell_repository.load_images()
-        self.assertEqual(self.cell_repository._data['group1']['path1'].image, 'image_data')
-
-    @patch('src.domain.image_builder.services.kdtree_service.KDTreeService.find_closest')
-    def test_find_closest_cell(self, mock_find_closest):
-        tree = MagicMock()
-        cell_rgb = CellRgb(255, 0, 0)
-        cell_obj = Cell.create(cell_rgb, 'group1', 'path/to/file').value
-
-        self.cell_repository._trees = {'group1': (tree, [cell_obj])}
-
-        mock_find_closest.return_value = Result.Success((0, 0))
-
-        result = self.cell_repository.find_closest_cell((255, 0, 0), 'group1')
-        self.assertEqual(result, cell_obj)
-
-    @patch('os.listdir')
-    @patch('os.path.join')
-    @patch('src.domain.image_builder.entities.cell_object.CellObject.create_from_image')
-    @patch('src.domain.image_builder.value_objects.cell_rgb.CellRgb.create')
-    def test_load_missing_groups(self, mock_cell_rgb_create, mock_cell_object_create, mock_path_join, mock_listdir):
-        mock_listdir.return_value = ['group1', 'group2']
-        self.cell_repository.get_all_groups = MagicMock(return_value=['group1'])
-        self.mock_file_repo.list_image_files.return_value = ['file1', 'file2']
-        self.mock_file_repo.read_image_file.return_value = Result.Success('image_data')
-        self.mock_file_repo.image_service.average_color.return_value = (255, 0, 0)
-
-        mock_cell_rgb_create.side_effect = lambda r, g, b: Result.Success(
-            CellRgb(
-                ColorDefinition(r),
-                ColorDefinition(g),
-                ColorDefinition(b)))
-        mock_cell_object_create.side_effect = lambda rgb, group, path: Result.Success(
-            CellObject(
-                Cell(
-                    rgb, group, path), 'image_data'))
-
-        self.cell_repository.mongo_collection.insert_one = MagicMock()
-
-        result = self.cell_repository.load_missing_groups()
-
+    def test_batch_lookup_matches_individual_colors(self):
+        self.write_image('black.png', 0)
+        self.write_image('white.png', 255)
+        self.assertTrue(self.repository.load_missing_groups().is_success)
+        result = self.repository.find_closest_metadata(np.array([[1, 1, 1], [250, 250, 250]]), 'group')
         self.assertTrue(result.is_success)
-        self.assertEqual(result.value, 'Missing groups loaded successfully')
+        self.assertTrue(result.value[0].cell.relative_file_path.endswith('black.png'))
+        self.assertTrue(result.value[1].cell.relative_file_path.endswith('white.png'))
 
-    def test_get_all_groups(self):
-        mock_collection = MagicMock()
-        mock_collection.aggregate.return_value = [{'_id': 'group1'}, {'_id': 'group2'}]
-        self.cell_repository.mongo_collection = mock_collection
+    def test_unknown_group_is_explicit_failure(self):
+        self.assertFalse(self.repository.find_closest_metadata([[0, 0, 0]], 'absent').is_success)
 
-        result = self.cell_repository.get_all_groups()
+    def test_memory_budget_rejects_lazy_decode_before_reader(self):
+        self.write_image('one.png', 10)
+        self.assertTrue(self.repository.load_missing_groups().is_success)
+        metadata = next(iter(self.repository.data['group'].values()))
+        self.repository.trim_image_cache(0)
+        with patch('src.infrastructure.data.image_builder.repositories.cell_repository.current_rss_bytes', return_value=900_000_000):
+            with patch.object(self.files, 'read_image_file') as reader:
+                result = self.repository.get_cell_image(metadata)
+        self.assertFalse(result.is_success)
+        reader.assert_not_called()
 
-        self.assertEqual(result, ['group1', 'group2'])
+    def test_targeted_sync_does_not_remove_other_groups(self):
+        other = os.path.join(self.root, 'other')
+        os.mkdir(other)
+        cv2.imwrite(os.path.join(other, 'image.png'), np.zeros((20, 20, 3), dtype=np.uint8))
+        self.write_image('one.png', 10)
+        self.assertTrue(self.repository.load_missing_groups().is_success)
+        self.assertTrue(self.repository.load_missing_groups(['group']).is_success)
+        self.assertEqual(len(self.collection.documents), 2)

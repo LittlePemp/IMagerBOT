@@ -23,6 +23,21 @@ from src.application.image_builder.queries.get_list_image_groups import \
     GetListImageGroupsQuery
 from src.presentation.rabbitmq.consumer import run_consumer
 from src.shared_kernel.loggers import presentation_logger
+from src.shared_kernel.result import Result
+
+
+def _execute(request):
+    try:
+        result = mediator.send(request)
+    except Exception as exc:
+        presentation_logger.exception(f'CLI operation failed: {exc}')
+        raise click.ClickException(str(exc)) from exc
+    if isinstance(result, Result):
+        if not result.is_success:
+            presentation_logger.error(f'CLI operation failed: {result.error}')
+            raise click.ClickException(str(result.error))
+        return result.value
+    return result
 
 
 @click.group()
@@ -33,55 +48,35 @@ def cli():
 @cli.command()
 def load_missing_groups():
     command = LoadMissingGroupsCommand()
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+    click.echo(_execute(command))
 
 
 @cli.command()
 @click.argument('directory')
 def load(directory):
     command = LoadImagesCommand(directory)
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+    click.echo(_execute(command))
 
 
 @cli.command()
 @click.argument('group_name')
 def verify(group_name):
     command = VerifyImagesCommand(group_name)
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+    click.echo(_execute(command))
 
 
 @cli.command()
-@click.argument('directory')
-def validate(directory):
-    command = ValidateImagesDataCommand(directory)
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+@click.argument('group_name')
+def validate(group_name):
+    command = ValidateImagesDataCommand(group_name)
+    click.echo(_execute(command))
 
 
 @cli.command()
 @click.argument('group_images')
 def check(group_images):
     command = CheckImagesCommand(group_images)
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+    click.echo(_execute(command))
 
 
 @cli.command()
@@ -98,17 +93,13 @@ def download_topic(keyword, group_name, limit, max_pages, sync_to_db):
         max_pages=max_pages,
         sync_to_db=sync_to_db,
     )
-    result = mediator.send(command)
-    if result.is_success:
-        click.echo(result.value)
-    else:
-        click.echo(f'Error: {result.error}')
+    click.echo(_execute(command))
 
 
 @cli.command()
 def list_groups():
     query = GetListImageGroupsQuery()
-    groups = mediator.send(query)
+    groups = _execute(query)
     for group in groups:
         click.echo(group)
 
@@ -117,9 +108,8 @@ def list_groups():
 @click.argument('image_path')
 def get_image_data(image_path):
     query = GetImageDataQuery(image_path)
-    handler = mediator.send(query)
-    image_data = handler.handle(query)
-    click.echo(image_data)
+    image_data = _execute(query)
+    click.echo({'shape': tuple(image_data.shape), 'dtype': str(image_data.dtype)})
 
 
 @cli.command()
@@ -131,23 +121,16 @@ def get_image_data(image_path):
 @click.option('--cell_size', default=40, help='Size of each cell in the final image')
 @click.option('--result_size', default=120, help='Number of cells along the longest side')
 def generate_image(image_path, group_name, insertion_format, alpha_channel, noise_level, cell_size, result_size):
-    try:
-        command = GenerateImageCommand(
-            image_path=image_path,
-            insertion_format=insertion_format,
-            alpha_channel=alpha_channel,
-            noise_level=noise_level,
-            cell_size=cell_size,
-            result_size=result_size,
-            group_name=group_name
-        )
-        result = mediator.send(command)
-        if result.is_success:
-            click.echo(f'Image saved at {result.value}')
-        else:
-            presentation_logger.error(f'Failed to generate image: {result.error}')
-    except Exception as e:
-        presentation_logger.error(f'An error occurred while generating image: {e}')
+    command = GenerateImageCommand(
+        image_path=image_path,
+        insertion_format=insertion_format,
+        alpha_channel=alpha_channel,
+        noise_level=noise_level,
+        cell_size=cell_size,
+        result_size=result_size,
+        group_name=group_name,
+    )
+    click.echo(f'Image saved at {_execute(command)}')
 
 
 @cli.command()
@@ -161,4 +144,8 @@ def runserver(host, port):
 @cli.command('run-consumer')
 def run_consumer_command():
     '''Run RabbitMQ consumer for imager commands.'''
-    asyncio.run(run_consumer())
+    try:
+        asyncio.run(run_consumer())
+    except Exception as exc:
+        presentation_logger.exception(f'Consumer failed: {exc}')
+        raise click.ClickException(str(exc)) from exc

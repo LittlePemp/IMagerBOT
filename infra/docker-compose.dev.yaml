@@ -21,8 +21,9 @@ services:
 
   imager:
     build:
-      context: .
-      dockerfile: imager/Dockerfile
+      context: ../imager
+      dockerfile: Dockerfile
+    mem_limit: 1000000000
     command: python manage.py run-consumer
     volumes:
       - ../imager:/app

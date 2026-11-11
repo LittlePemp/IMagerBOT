@@ -1,3 +1,7 @@
+from src.shared_kernel.resource_limits import configure_decoder_limits
+
+configure_decoder_limits()
+
 import cv2
 from cv2.typing import MatLike
 from src.shared_kernel.result import Result
@@ -13,10 +17,11 @@ class CellObject:
         self.image: MatLike = image
 
     @staticmethod
-    def create(cell: Cell) -> Result:
+    def create(cell: Cell, image: MatLike = None, *, load_image: bool = True) -> Result:
         try:
-            image: MatLike = cv2.imread(cell.relative_file_path)
-            if image is None:
+            if image is None and load_image:
+                image = cv2.imread(cell.relative_file_path)
+            if image is None and load_image:
                 return EntitiesErrorMessages.error_opening_image(
                     cell.relative_file_path)
             cell_object = CellObject(cell, image)
