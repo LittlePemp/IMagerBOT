@@ -1,7 +1,7 @@
 """Delivery of core completion-outbox events to Telegram.
 
-Delivery is at least once: a process can stop after Telegram accepts a document
-and before Mongo acknowledges the event. The canonical core result is unchanged.
+Each result has one send attempt. A durable boundary before Telegram I/O prevents a
+timeout or a process restart from causing another document to be sent.
 """
 import asyncio
 import tempfile
@@ -18,10 +18,11 @@ from src.utils.result_files import delivery_result_filename
 
 
 class GenerationNotifier:
-    def __init__(self, service, bot, history_repository):
+    def __init__(self, service, bot, history_repository, *, progress=None):
         self.service = service
         self.bot = bot
         self.history_repository = history_repository
+        self.progress = progress
         self._telegram_resume_at = 0.0
 
     async def _renew(self, job_id, token, lost):
@@ -51,6 +52,8 @@ class GenerationNotifier:
         token = outbox['token']
         lost = asyncio.Event()
         renewal = asyncio.create_task(self._renew(job_id, token, lost))
+        send_started = False
+        accepted_message_id = None
         try:
             context = job['request']['client_context']
             chat_id = context['chat_id']
@@ -64,30 +67,33 @@ class GenerationNotifier:
                         self.service.object_store.download_result, result, path,
                         max_bytes=self.service.config.telegram_max_document_size_bytes,
                     )
-                    if lost.is_set():
-                        raise RuntimeError('Delivery lease was lost before sending the document')
                     filename = delivery_result_filename(
                         context.get('display_name'), created_at=job.get('created_at'), job_id=job_id,
                     )
+                    document = FSInputFile(path, filename=filename)
+                    if lost.is_set() or not await self.service.mark_delivery_started(job_id, token):
+                        raise RuntimeError('Delivery lease was lost before sending the document')
+                    send_started = True
                     message = await self.bot.send_document(
                         chat_id=chat_id,
-                        document=FSInputFile(
-                            path, filename=filename,
-                        ),
+                        document=document,
                         caption='Ваше изображение готово.',
                     )
+                    accepted_message_id = message.message_id
             else:
-                if lost.is_set():
+                if lost.is_set() or not await self.service.mark_delivery_started(job_id, token):
                     raise RuntimeError('Delivery lease was lost before sending the notification')
-                message = await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        'Не удалось собрать изображение. '
-                        'Попробуйте другие параметры или обратитесь в поддержку.'
-                    ),
-                )
+                send_started = True
+                if self.progress is not None:
+                    accepted_message_id = await self.progress.fail_generation(job)
+                if accepted_message_id is None:
+                    message = await self.bot.send_message(
+                        chat_id=chat_id,
+                        text='😔 Не получилось собрать изображение.',
+                    )
+                    accepted_message_id = message.message_id
             acknowledged = await self.service.acknowledge_completion(
-                job_id, token, message.message_id
+                job_id, token, accepted_message_id
             )
             if not acknowledged:
                 raise RuntimeError(
@@ -95,7 +101,8 @@ class GenerationNotifier:
                 )
             service_logger.info(f'Telegram result delivered: job_id={job_id}')
         except asyncio.CancelledError:
-            # A later notifier can reclaim the event after its lease expires.
+            # Only preparation is reclaimable. An interrupted send stays
+            # uncertain after expiry and must never be sent again.
             raise
         except Exception as error:
             if isinstance(error, TelegramRetryAfter):
@@ -104,8 +111,14 @@ class GenerationNotifier:
                 self._telegram_resume_at = asyncio.get_running_loop().time() + (
                     max(error.retry_after, 0) + config.bot.notification_retry_after_grace_seconds
                 )
-            exception_logger.exception(f'Telegram result delivery failed: job_id={job_id}')
-            await self.service.fail_completion(job_id, token, outbox['attempts'], error)
+            action = 'acknowledgement' if accepted_message_id is not None else 'delivery'
+            exception_logger.exception(f'Telegram result {action} failed: job_id={job_id}')
+            if accepted_message_id is None:
+                await self.service.fail_completion(
+                    job_id, token, error, send_started=send_started,
+                )
+            # Telegram's known success must not become a false delivery failure
+            # when Mongo is unavailable. Its started claim cannot be resent.
         finally:
             renewal.cancel()
             with suppress(asyncio.CancelledError):

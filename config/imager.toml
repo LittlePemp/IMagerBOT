@@ -90,6 +90,7 @@ jobs_collection = "generation_jobs"
 catalog_collection = "catalog_groups"
 bot_admissions_collection = "bot_admissions"
 bot_fsm_collection = "conversation_states"
+bot_progress_collection = "generation_progress"
 
 [jobs]
 execution_lease_seconds = 60
@@ -147,10 +148,6 @@ maximum_attempts = 5
 timezone = "Europe/Moscow"
 notification_poll_seconds = 2.0
 notification_lease_seconds = 120
-notification_max_attempts = 5
-notification_retry_initial_seconds = 2.0
-notification_retry_backoff_coefficient = 2.0
-notification_retry_max_seconds = 60.0
 notification_renew_divisor = 3.0
 notification_renew_min_seconds = 1.0
 error_max_length = 2000
@@ -170,6 +167,10 @@ admission_poll_seconds = 1.0
 admission_lease_seconds = 60
 admission_retry_seconds = 3.0
 max_pending_jobs = 64
+progress_poll_seconds = 2.0
+progress_batch_size = 64
+progress_retention_seconds = 86400
+source_disk_headroom_bytes = 1000000000
 max_concurrent_updates = 32
 max_concurrent_uploads = 2
 updates_per_second = 2.0
@@ -191,8 +192,8 @@ history_repair_poll_seconds = 5.0
 history_repair_lease_seconds = 60
 history_repair_retry_initial_seconds = 5.0
 history_repair_retry_max_seconds = 300.0
+history_repair_backoff_coefficient = 2.0
 notification_retry_after_grace_seconds = 1.0
-notification_retry_jitter_ratio = 0.2
 
 [pack_import]
 jobs_collection = "catalog_import_jobs"

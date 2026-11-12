@@ -107,6 +107,7 @@ class RuntimeMongoConfig:
     catalog_collection: str
     bot_admissions_collection: str
     bot_fsm_collection: str
+    bot_progress_collection: str
 
 
 @dataclass(frozen=True)
@@ -185,10 +186,6 @@ class RuntimeBotConfig:
     timezone: str
     notification_poll_seconds: float
     notification_lease_seconds: int
-    notification_max_attempts: int
-    notification_retry_initial_seconds: float
-    notification_retry_backoff_coefficient: float
-    notification_retry_max_seconds: float
     notification_renew_divisor: float
     notification_renew_min_seconds: float
     error_max_length: int
@@ -207,6 +204,10 @@ class RuntimeBotConfig:
     admission_lease_seconds: int
     admission_retry_seconds: float
     max_pending_jobs: int
+    progress_poll_seconds: float
+    progress_batch_size: int
+    progress_retention_seconds: int
+    source_disk_headroom_bytes: int
     max_concurrent_updates: int
     max_concurrent_uploads: int
     updates_per_second: float
@@ -226,8 +227,8 @@ class RuntimeBotConfig:
     history_repair_lease_seconds: int
     history_repair_retry_initial_seconds: float
     history_repair_retry_max_seconds: float
+    history_repair_backoff_coefficient: float
     notification_retry_after_grace_seconds: float
-    notification_retry_jitter_ratio: float
     api_base_url: str
     api_local: bool
 

@@ -218,8 +218,6 @@ def _validate(config):
         _basename(getattr(imports, name), f'pack_import.{name}')
     _key_template(imports.archive_key_template, {'import_id', 'sha256'}, 'pack_import.archive_key_template',
                   {'import_id': 'i' * JOB_ID_MAX_LENGTH, 'sha256': 'a' * 64}, OBJECT_KEY_MAX_LENGTH)
-    if not 0 < bot.notification_retry_jitter_ratio <= 1:
-        raise ConfigurationError('bot.notification_retry_jitter_ratio must be at most one')
     if bot.history_repair_retry_initial_seconds > bot.history_repair_retry_max_seconds:
         raise ConfigurationError('History repair backoff bounds are inverted')
     if bot.ui_page_size > 20 or bot.ui_label_max_length > bot.ui_name_max_length:
@@ -271,9 +269,10 @@ def _validate(config):
            config.bot.notification_lease_seconds / config.bot.notification_renew_divisor
            ) >= config.bot.notification_lease_seconds:
         raise ConfigurationError('Notification renewal interval must fit inside the lease')
-    if (bot.notification_retry_backoff_coefficient < 1
-            or bot.notification_retry_initial_seconds > bot.notification_retry_max_seconds):
-        raise ConfigurationError('Notification retry backoff bounds are inconsistent')
+    if bot.history_repair_backoff_coefficient < 1:
+        raise ConfigurationError('History repair backoff coefficient must be at least one')
+    if bot.progress_batch_size < bot.max_pending_jobs:
+        raise ConfigurationError('Progress batch must cover the admitted queue')
     if bot.error_excerpt_length > bot.error_max_length:
         raise ConfigurationError('Bot error excerpt exceeds retained error length')
     for name in ('source_filename', 'upload_filename', 'cell_filename', 'manifest_filename', 'result_filename'):

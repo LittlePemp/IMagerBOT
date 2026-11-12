@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     minio_secure: bool = config.storage.secure
     bot_notification_poll_seconds: float = Field(default=config.bot.notification_poll_seconds, gt=0)
     bot_notification_lease_seconds: int = Field(default=config.bot.notification_lease_seconds, gt=0)
-    bot_notification_max_attempts: int = Field(default=config.bot.notification_max_attempts, gt=0)
     image_groups_relative_path: str = config.paths.image_groups
     uploaded_images_path: str = config.paths.uploads
     generated_images_path: str = config.paths.generated

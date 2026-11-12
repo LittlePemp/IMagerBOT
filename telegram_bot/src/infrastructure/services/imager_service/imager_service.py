@@ -18,7 +18,7 @@ from src.infrastructure.services.object_storage import BotObjectStorage
 from src.utils.loggers import service_logger
 
 from .schemas import GenerationAccepted, GroupInfo, ListGroupsResponse, SyncGroupsResponse
-from .delivery_policy import bounded_backoff, delivery_failure
+from .delivery_policy import DeliveryFailureKind, bounded_backoff, delivery_failure
 
 
 def _secret(value):
@@ -84,6 +84,22 @@ class ImagerService:
             {'request.client_id': 'telegram', 'request.client_context.user_id': actor_id},
             sort=[('created_at', -1)],
         )
+
+    async def active_queue(self, *, pending_ids=()):
+        query = {'status': {'$in': ['queued', 'running', 'retrying']}}
+        if pending_ids:
+            query = {'$or': [query, {'_id': {'$in': list(pending_ids)}}]}
+        return await asyncio.to_thread(lambda: list(self.jobs.find(
+            query,
+            {'_id': 1, 'status': 1, 'created_at': 1},
+        ).sort([('created_at', 1), ('_id', 1)])))
+
+    async def progress_jobs(self, job_ids):
+        return await asyncio.to_thread(lambda: list(self.jobs.find(
+            {'_id': {'$in': job_ids}, 'request.client_id': 'telegram'},
+            {'status': 1, 'created_at': 1, 'execution.progress': 1,
+             'completion_outbox.state': 1, 'request.client_context': 1},
+        )))
 
     async def count_active_jobs(self):
         return await asyncio.to_thread(
@@ -179,36 +195,40 @@ class ImagerService:
         )
 
     async def claim_completion(self):
+        """Reclaim preparation only; a started Telegram send is never repeated."""
         now = datetime.now(timezone.utc)
         token = uuid4().hex
-        maximum = self.config.bot_notification_max_attempts
-        # A final delivery attempt may have died before its exception handler.
+        # A previous process may have sent the document before it stopped.
+        # Older pending retries also have an unknown delivery outcome.
         await asyncio.to_thread(
             self.jobs.update_many,
             {
                 'request.client_id': 'telegram',
-                'completion_outbox.attempts': {'$gte': maximum},
                 '$or': [
-                    {'completion_outbox.state': 'pending'},
+                    {'completion_outbox.state': 'pending',
+                     'completion_outbox.attempts': {'$gt': 0}},
                     {'completion_outbox.state': 'claimed',
                      'completion_outbox.lease_until': {'$lte': now}},
                 ],
             },
             {'$set': {
-                'completion_outbox.state': 'failed',
-                'completion_outbox.error': 'Telegram delivery attempts exhausted',
+                'completion_outbox.state': 'uncertain',
+                'completion_outbox.error': 'Telegram delivery outcome is unknown; resend disabled',
+                'completion_outbox.error_kind': 'uncertain',
+                'completion_outbox.lease_until': None,
             }},
         )
         query = {
             'request.client_id': 'telegram',
             'status': {'$in': ['completed', 'failed']},
-            'completion_outbox.attempts': {'$lt': maximum},
             '$or': [
                 {'completion_outbox.state': 'pending',
+                 'completion_outbox.attempts': 0,
                  'completion_outbox.available_at': {'$lte': now}},
                 {'completion_outbox.state': 'pending',
+                 'completion_outbox.attempts': 0,
                  'completion_outbox.available_at': {'$exists': False}},
-                {'completion_outbox.state': 'claimed',
+                {'completion_outbox.state': 'preparing',
                  'completion_outbox.lease_until': {'$lte': now}},
             ],
         }
@@ -216,21 +236,36 @@ class ImagerService:
             self.jobs.find_one_and_update, query,
             {
                 '$set': {
-                    'completion_outbox.state': 'claimed',
+                    'completion_outbox.state': 'preparing',
                     'completion_outbox.token': token,
                     'completion_outbox.lease_until': now + timedelta(
                         seconds=self.config.bot_notification_lease_seconds
                     ),
                 },
-                '$inc': {'completion_outbox.attempts': 1},
             },
             sort=[('updated_at', 1)], return_document=ReturnDocument.AFTER,
         )
 
+    async def mark_delivery_started(self, job_id, token):
+        """Persist the non-repeatable boundary immediately before Telegram I/O."""
+        now = datetime.now(timezone.utc)
+        result = await asyncio.to_thread(
+            self.jobs.update_one,
+            {'_id': job_id, 'completion_outbox.state': 'preparing',
+             'completion_outbox.token': token, 'completion_outbox.lease_until': {'$gt': now}},
+            {'$set': {
+                'completion_outbox.state': 'claimed',
+                'completion_outbox.started_at': now,
+                'completion_outbox.attempts': 1,
+            }},
+        )
+        return result.matched_count == 1
+
     async def renew_completion(self, job_id, token):
         result = await asyncio.to_thread(
             self.jobs.update_one,
-            {'_id': job_id, 'completion_outbox.state': 'claimed', 'completion_outbox.token': token},
+            {'_id': job_id, 'completion_outbox.state': {'$in': ['preparing', 'claimed']},
+             'completion_outbox.token': token},
             {'$set': {'completion_outbox.lease_until': datetime.now(timezone.utc) + timedelta(
                 seconds=self.config.bot_notification_lease_seconds
             )}},
@@ -240,41 +275,43 @@ class ImagerService:
     async def acknowledge_completion(self, job_id, token, message_id):
         result = await asyncio.to_thread(
             self.jobs.update_one,
-            {'_id': job_id, 'completion_outbox.state': 'claimed', 'completion_outbox.token': token},
+            # Expiry may have marked the same send uncertain while Telegram was
+            # returning its response. Its original token can still record fact.
+            {'_id': job_id, 'completion_outbox.state': {'$in': ['claimed', 'uncertain']},
+             'completion_outbox.token': token},
             {'$set': {
                 'completion_outbox.state': 'sent',
                 'completion_outbox.sent_at': datetime.now(timezone.utc),
                 'completion_outbox.message_id': message_id,
                 'completion_outbox.lease_until': None,
+                'completion_outbox.error': None,
+                'completion_outbox.error_kind': None,
             }},
         )
         return result.matched_count == 1
 
-    async def fail_completion(self, job_id, token, attempts, error):
-        failure = delivery_failure(error, attempts, runtime_config.bot)
-        exhausted = (not failure.restore_attempt
-                     and attempts >= self.config.bot_notification_max_attempts)
-        terminal = failure.retry_seconds is None or exhausted
+    async def fail_completion(self, job_id, token, error, *, send_started=False):
+        failure = delivery_failure(error)
+        # A transport error after send started can hide an accepted document.
+        # Explicit Bot API refusals and preparation errors are definite failures.
+        state = ('uncertain' if send_started and failure == DeliveryFailureKind.TRANSIENT
+                 else 'failed')
         update = {'$set': {
-            'completion_outbox.state': 'failed' if terminal else 'pending',
+            'completion_outbox.state': state,
             'completion_outbox.error': str(error)[:runtime_config.bot.error_max_length],
-            'completion_outbox.error_kind': failure.kind.value,
-            'completion_outbox.available_at': (
-                datetime.now(timezone.utc) + timedelta(seconds=failure.retry_seconds)
-                if not terminal else None
-            ),
+            'completion_outbox.error_kind': failure.value,
+            'completion_outbox.available_at': None,
             'completion_outbox.lease_until': None,
         }}
-        if failure.restore_attempt:
-            update['$inc'] = {'completion_outbox.attempts': -1}
         result = await asyncio.to_thread(
             self.jobs.update_one,
-            {'_id': job_id, 'completion_outbox.state': 'claimed', 'completion_outbox.token': token},
+            {'_id': job_id, 'completion_outbox.state': {'$in': ['preparing', 'claimed', 'uncertain']},
+             'completion_outbox.token': token},
             update,
         )
         service_logger.error(
-            f'Telegram delivery failed: job_id={job_id}, attempts={attempts}, '
-            f'kind={failure.kind.value}, terminal={terminal}, error={error}'
+            f'Telegram delivery stopped: job_id={job_id}, '
+            f'kind={failure.value}, state={state}, error={error}'
         )
         return result.matched_count == 1
 
@@ -323,7 +360,7 @@ class ImagerService:
     async def fail_history_projection(self, job_id, token, attempts, error):
         delay = bounded_backoff(
             attempts, runtime_config.bot.history_repair_retry_initial_seconds,
-            runtime_config.bot.notification_retry_backoff_coefficient,
+            runtime_config.bot.history_repair_backoff_coefficient,
             runtime_config.bot.history_repair_retry_max_seconds,
         )
         result = await asyncio.to_thread(
@@ -339,35 +376,6 @@ class ImagerService:
                 'telegram_history_projection.error': str(error)[:runtime_config.bot.error_max_length],
             }},
         )
-        return result.matched_count == 1
-
-    async def retry_delivery(self, job_id, actor_id):
-        """Requeue only this owner's failed notification; rendering is untouched."""
-        import re
-        from imager_contracts.protocol import JOB_ID_PATTERN
-
-        if not isinstance(job_id, str) or not re.fullmatch(JOB_ID_PATTERN, job_id):
-            raise ValueError('Не удалось найти изображение. Откройте «Моё изображение» в меню.')
-        result = await asyncio.to_thread(
-            self.jobs.update_one,
-            {'_id': job_id, 'request.client_id': 'telegram',
-             'request.client_context.user_id': actor_id,
-             'status': 'completed', 'result': {'$ne': None},
-             'completion_outbox.state': 'failed'},
-            {'$set': {
-                'completion_outbox.state': 'pending',
-                'completion_outbox.attempts': 0,
-                'completion_outbox.available_at': datetime.now(timezone.utc),
-                'completion_outbox.lease_until': None,
-                'completion_outbox.token': None,
-                'completion_outbox.error': None,
-                'completion_outbox.error_kind': None,
-                'completion_outbox.retry_requested_by': actor_id,
-                'completion_outbox.retry_requested_at': datetime.now(timezone.utc),
-            }},
-        )
-        if result.matched_count == 1:
-            service_logger.info(f'Telegram delivery retry requested: job_id={job_id}, actor_id={actor_id}')
         return result.matched_count == 1
 
     def close(self):

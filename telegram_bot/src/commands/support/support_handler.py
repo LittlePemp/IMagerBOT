@@ -8,7 +8,6 @@ from src.utils.navigation import render_view
 
 def support_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Моё изображение", callback_data="my_image")
     add_home_button(builder, text="Главное меню")
     builder.adjust(1)
     return builder.as_markup()
@@ -17,10 +16,8 @@ def support_keyboard():
 async def show_support(callback: CallbackQuery, state):
     await state.clear()
     await render_view(callback, state,
-        "Если результат не пришёл, откройте «Моё изображение»: там можно проверить готовность "
-        "и повторить отправку, если она не удалась.\n\n"
-        "Чтобы выбрать другое фото или новые параметры, вернитесь в главное меню "
-        "и начните сборку заново.",
+        "Выберите «Собрать изображение» в главном меню и следуйте подсказкам.\n\n"
+        "Отменить текущий ввод можно командой /cancel.",
         support_keyboard(),
     )
     await callback.answer()

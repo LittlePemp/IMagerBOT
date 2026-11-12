@@ -177,18 +177,49 @@ class AdmissionRepository:
         result = await cursor.to_list(length=1)
         return result[0]['count'] if result else 0
 
+    async def pending_submissions(self, limit):
+        cursor = await self.collection.aggregate([
+            {'$match': {'admissions.state': {'$in': ['pending', 'claimed']}}},
+            {'$unwind': '$admissions'},
+            {'$match': {'admissions.state': {'$in': ['pending', 'claimed']}}},
+            {'$replaceRoot': {'newRoot': '$admissions.document'}},
+            {'$sort': {'created_at': 1, '_id': 1}}, {'$limit': limit},
+            {'$project': {'_id': 1, 'created_at': 1, 'status': 1}},
+        ])
+        return await cursor.to_list(length=limit)
+
     async def claim(self, now=None):
         moment = self._now(now)
+        eligible = {'$or': [
+            {'state': 'pending', 'next_attempt_at': {'$lte': moment}},
+            {'state': 'claimed', 'lease_until': {'$lte': moment}},
+        ]}
+        # A bucket's creation time is the account's first admission that day,
+        # not the age of its next image. Select entries globally, then recheck
+        # their eligibility in the atomic claim below.
+        cursor = await self.collection.aggregate([
+            {'$match': {'admissions': {'$elemMatch': eligible}}},
+            {'$unwind': '$admissions'},
+            {'$match': {'$or': [
+                {'admissions.state': 'pending', 'admissions.next_attempt_at': {'$lte': moment}},
+                {'admissions.state': 'claimed', 'admissions.lease_until': {'$lte': moment}},
+            ]}},
+            {'$sort': {'admissions.accepted_at': 1, 'admissions.job_id': 1}},
+            {'$limit': 1},
+            {'$project': {'_id': 1, 'job_id': '$admissions.job_id'}},
+        ])
+        candidates = await cursor.to_list(length=1)
+        if not candidates:
+            return None
+        candidate = candidates[0]
         token = uuid4().hex
         bucket = await self.collection.find_one_and_update(
-            {'admissions': {'$elemMatch': {'$or': [
-                {'state': 'pending', 'next_attempt_at': {'$lte': moment}},
-                {'state': 'claimed', 'lease_until': {'$lte': moment}},
-            ]}}},
+            {'_id': candidate['_id'],
+             'admissions': {'$elemMatch': dict(eligible, job_id=candidate['job_id'])}},
             {'$set': {'admissions.$.state': 'claimed', 'admissions.$.token': token,
                       'admissions.$.lease_until': moment + timedelta(seconds=self.lease_seconds)},
              '$inc': {'admissions.$.attempts': 1}},
-            sort=[('created_at', 1)], return_document=ReturnDocument.AFTER,
+            return_document=ReturnDocument.AFTER,
         )
         if bucket is None:
             return None

@@ -1,5 +1,6 @@
 """Telegram source transfer and the small photo handler."""
 import tempfile
+import shutil
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -11,7 +12,6 @@ from src.infrastructure.services.telegram_files import validate_download_path
 from src.utils.middlewares.abuse_control import UploadBusy
 from src.utils.navigation import render_view
 from src.utils.result_files import contains_generation_reference, new_result_filename
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 def generation_job_id(message):
@@ -41,10 +41,14 @@ class TelegramPhotoSource:
 
     async def __call__(self, job_id):
         photo = self.message.photo[-1]
+        if photo.file_size is not None and photo.file_size > config.limits.source_file_bytes:
+            raise ValueError('Размер исходного файла превышает допустимый предел.')
+        self._check_disk()
         remote = await self.message.bot.get_file(photo.file_id)
         validate_download_path(self.message.bot, remote)
         if remote.file_size is not None and remote.file_size > config.limits.source_file_bytes:
             raise ValueError('Размер исходного файла превышает допустимый предел.')
+        self._check_disk()
         with tempfile.TemporaryDirectory(prefix=config.storage.upload_temp_prefix) as directory:
             path = Path(directory) / config.storage.upload_filename
             with path.open('wb+') as stream:
@@ -54,8 +58,18 @@ class TelegramPhotoSource:
                 )
             return await self.gateway.upload_source(path, job_id)
 
+    def _check_disk(self):
+        roots = {Path(tempfile.gettempdir())}
+        api = getattr(getattr(self.message.bot, 'session', None), 'api', None)
+        if getattr(api, 'is_local', False):
+            roots.add(Path(config.pack_import.bot_api_container_directory))
+        required = (config.bot.source_disk_headroom_bytes
+                    + config.limits.source_file_bytes * config.bot.max_concurrent_uploads)
+        if any(shutil.disk_usage(root).free < required for root in roots):
+            raise ValueError('Недостаточно свободного места для загрузки фото. Попробуйте позже.')
 
-async def receive_image(message, state, user, generation_service):
+
+async def receive_image(message, state, user, generation_service, generation_progress):
     draft = await state.get_data()
     job_id = generation_job_id(message)
     try:
@@ -71,15 +85,8 @@ async def receive_image(message, state, user, generation_service):
         await message.answer(f'На сегодня доступно {error.limit} изображений. Лимит обновится в полночь ({config.bot.timezone}).')
         return
     except AdmissionUncertain as error:
-        keyboard = InlineKeyboardBuilder()
-        keyboard.button(text='Проверить статус', callback_data=f'job_status:{error.job_id}')
-        keyboard.button(text='Главное меню', callback_data='main_menu')
-        keyboard.adjust(1)
-        await render_view(
-            message, state,
-            'Пока не удалось подтвердить приём изображения. Проверьте статус немного позже.',
-            keyboard.as_markup(),
-        )
+        await state.clear()
+        await generation_progress.watch(message, job_id=error.job_id, actor_id=user.telegram_id)
         return
     except (AccessDenied, UploadBusy, ValueError) as error:
         text = str(error)
@@ -88,13 +95,6 @@ async def receive_image(message, state, user, generation_service):
         await render_view(message, state, text, home_keyboard())
         return
     await state.clear()
-    keyboard = InlineKeyboardBuilder()
-    keyboard.button(text='Статус изображения', callback_data=f'job_status:{receipt.job_id}')
-    keyboard.button(text='Главное меню', callback_data='main_menu')
-    keyboard.adjust(1)
-    await render_view(
-        message, state,
-        f'Изображение {"уже " if receipt.duplicate else ""}принято. '
-        'Результат придёт отдельным сообщением.',
-        keyboard.as_markup(),
+    await generation_progress.watch(
+        message, job_id=receipt.job_id, actor_id=user.telegram_id, duplicate=receipt.duplicate,
     )

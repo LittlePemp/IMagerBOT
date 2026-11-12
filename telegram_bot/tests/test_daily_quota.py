@@ -117,6 +117,30 @@ class AtomicCollection:
             return copy.deepcopy(candidate)
 
     async def aggregate(self, pipeline):
+        if any('$unwind' in stage for stage in pipeline):
+            # Evaluate the claim's entry-level match and ordering, rather than
+            # the surrounding daily bucket's insertion/creation order.
+            condition = next(stage['$match']['$or'] for stage in pipeline
+                             if '$match' in stage and '$or' in stage['$match'])
+            eligible = {'$or': [
+                {key.removeprefix('admissions.'): value for key, value in item.items()}
+                for item in condition
+            ]}
+            candidates = [
+                (bucket['_id'], entry)
+                for bucket in self.documents.values() for entry in bucket['admissions']
+                if matches(entry, eligible)
+            ]
+            ordering = next(stage['$sort'] for stage in pipeline if '$sort' in stage)
+            for field, direction in reversed(list(ordering.items())):
+                candidates.sort(
+                    key=lambda item: item[1][field.removeprefix('admissions.')],
+                    reverse=direction < 0,
+                )
+            limit = next(stage['$limit'] for stage in pipeline if '$limit' in stage)
+            result = [{'_id': bucket_id, 'job_id': entry['job_id']}
+                      for bucket_id, entry in candidates[:limit]]
+            return SimpleNamespace(to_list=AsyncMock(return_value=result))
         pending = sum(entry['state'] in ('pending', 'claimed')
                       for bucket in self.documents.values() for entry in bucket['admissions'])
         return SimpleNamespace(to_list=AsyncMock(return_value=[{'count': pending}] if pending else []))
@@ -189,6 +213,69 @@ class TestDailyQuota(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.repository.acknowledge(first.job_id, first.token))
         self.assertTrue(await self.repository.acknowledge(second.job_id, second.token))
         self.assertEqual((await self.repository.find('job')).state, 'sent')
+
+    async def test_claim_orders_entries_across_accounts_instead_of_daily_buckets(self):
+        early = self.now.replace(hour=9)
+        older = self.now.replace(hour=10)
+        newer = older + timedelta(minutes=1)
+        await self.repository.accept_submission(submission('a-first'), actor_id=1, now=early)
+        first = await self.repository.claim(early)
+        await self.repository.acknowledge(first.job_id, first.token, now=early)
+        # The account's 09:00 bucket must not promote its 10:01 image over
+        # another account's 10:00 image, despite being inserted earlier.
+        await self.repository.accept_submission(submission('b-older', user_id=2), actor_id=2, now=older)
+        await self.repository.accept_submission(submission('a-newer'), actor_id=1, now=newer)
+        selected = await self.repository.claim(newer)
+        self.assertEqual(selected.job_id, 'b-older')
+        selected = await self.repository.claim(newer)
+        self.assertEqual(selected.job_id, 'a-newer')
+
+    async def test_live_claim_and_deferred_retry_are_skipped_until_eligible(self):
+        await self.repository.accept_submission(submission('first'), actor_id=1, now=self.now)
+        await self.repository.accept_submission(submission('second', user_id=2), actor_id=2,
+                                                now=self.now + timedelta(seconds=1))
+        first = await self.repository.claim(self.now)
+        second = await self.repository.claim(self.now + timedelta(seconds=2))
+        self.assertEqual((first.job_id, second.job_id), ('first', 'second'))
+        self.assertIsNone(await self.repository.claim(self.now + timedelta(seconds=59)))
+        reclaimed = await self.repository.claim(self.now + timedelta(seconds=60))
+        self.assertEqual(reclaimed.job_id, 'first')
+        self.assertNotEqual(reclaimed.token, first.token)
+        self.assertFalse(await self.repository.acknowledge(first.job_id, first.token))
+        await self.repository.retry(reclaimed.job_id, reclaimed.token, RuntimeError('temporarily down'),
+                                    error_max_length=100, now=self.now + timedelta(seconds=60))
+        self.assertIsNone(await self.repository.claim(self.now + timedelta(seconds=61)))
+        reclaimed_again = await self.repository.claim(self.now + timedelta(seconds=63))
+        self.assertEqual(reclaimed_again.job_id, 'first')
+
+    async def test_equal_acceptance_times_have_deterministic_job_id_order(self):
+        await self.repository.accept_submission(submission('z-last'), actor_id=1, now=self.now)
+        await self.repository.accept_submission(submission('a-first', user_id=2), actor_id=2, now=self.now)
+        self.assertEqual((await self.repository.claim(self.now)).job_id, 'a-first')
+
+    async def test_lost_candidate_claim_returns_without_claiming_another_entry(self):
+        await self.repository.accept_submission(submission('first'), actor_id=1, now=self.now)
+        await self.repository.accept_submission(submission('second', user_id=2), actor_id=2, now=self.now)
+        original_update = self.collection.find_one_and_update
+        updates = 0
+
+        async def competing_claim(query, change, **kwargs):
+            nonlocal updates
+            updates += 1
+            # Another dispatcher has renewed the selected entry after the
+            # candidate read. The CAS must neither take it nor a sibling.
+            selected_id = query['admissions']['$elemMatch']['job_id']
+            for bucket in self.collection.documents.values():
+                for entry in bucket['admissions']:
+                    if entry['job_id'] == selected_id:
+                        entry.update(state='claimed', token='other-owner',
+                                     lease_until=self.now + timedelta(seconds=60))
+            return await original_update(query, change, **kwargs)
+
+        self.collection.find_one_and_update = competing_claim
+        self.assertIsNone(await self.repository.claim(self.now))
+        self.assertEqual(updates, 1)
+        self.assertEqual((await self.repository.find('second')).state, 'pending')
 
     async def test_write_concern_and_cross_day_job_index_are_explicit(self):
         await self.repository.initialize_indexes()

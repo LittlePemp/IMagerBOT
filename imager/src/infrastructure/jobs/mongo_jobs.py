@@ -66,7 +66,7 @@ class MongoJobRepository:
                 'dispatch.lease_until': now + timedelta(seconds=self.lease_seconds),
                 'updated_at': now,
             }, '$inc': {'dispatch.attempts': 1}},
-            sort=[('created_at', 1)], return_document=ReturnDocument.AFTER,
+            sort=[('created_at', 1), ('_id', 1)], return_document=ReturnDocument.AFTER,
         )
         if job is None:
             return None

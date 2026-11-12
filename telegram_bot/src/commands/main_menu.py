@@ -10,7 +10,7 @@ MAIN_MENU_TEXT = 'Главное меню'
 def build_main_menu_keyboard(is_admin):
     builder = InlineKeyboardBuilder()
     for title, action in [
-        ('Собрать изображение', 'generate_image'), ('Моё изображение', 'my_image'),
+        ('Собрать изображение', 'generate_image'),
         ('О проекте', 'about'), ('Поддержка', 'support'),
     ]:
         builder.button(text=title, callback_data=action)
@@ -33,7 +33,6 @@ async def main_menu_callback(callback, state, user):
 
 async def help_command(message, user):
     commands = '/start, /menu — главное меню\n/cancel — отменить текущий ввод\n/help — справка'
-    commands += '\n/status — моё изображение'
     if user.is_admin:
         commands += '\n/admin — админ-панель'
     await message.answer(commands)

@@ -35,7 +35,8 @@ def job_document():
                 'cell_size': 40, 'result_size': 120,
             },
         },
-        'completion_outbox': {'state': 'claimed', 'token': 'send-token', 'attempts': 5},
+        'completion_outbox': {'state': 'claimed', 'token': 'send-token', 'attempts': 1,
+                              'lease_until': datetime.now(timezone.utc) + timedelta(seconds=120)},
         'telegram_history_projection': {'state': 'claimed', 'token': 'history-token', 'attempts': 1},
     }
 
@@ -54,8 +55,32 @@ class MutableJob:
     def __init__(self, document):
         self.document = copy.deepcopy(document)
 
+    @staticmethod
+    def matches(document, query):
+        for key, expected in query.items():
+            if key == '$or':
+                if not any(MutableJob.matches(document, clause) for clause in expected):
+                    return False
+                continue
+            actual = nested(document, key)
+            if isinstance(expected, dict):
+                for operator, value in expected.items():
+                    if operator == '$in' and actual not in value:
+                        return False
+                    if operator == '$exists' and (actual is not None) != value:
+                        return False
+                    if operator == '$gt' and (actual is None or actual <= value):
+                        return False
+                    if operator == '$lte' and (actual is None or actual > value):
+                        return False
+                    if operator not in ('$in', '$exists', '$gt', '$lte'):
+                        raise AssertionError(operator)
+            elif actual != expected:
+                return False
+        return True
+
     def update_one(self, query, update):
-        if any(nested(self.document, key) != value for key, value in query.items()):
+        if not self.matches(self.document, query):
             return SimpleNamespace(matched_count=0)
         for operator, values in update.items():
             for path, value in values.items():
@@ -71,39 +96,46 @@ class MutableJob:
                     raise AssertionError(operator)
         return SimpleNamespace(matched_count=1)
 
+    def update_many(self, query, update):
+        return self.update_one(query, update)
+
+    def find_one_and_update(self, query, update, **kwargs):
+        updated = self.update_one(query, update)
+        return copy.deepcopy(self.document) if updated.matched_count else None
+
 
 class TestDeliveryFailures(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.store = MutableJob(job_document())
         self.service = ImagerService(
-            SimpleNamespace(bot_notification_max_attempts=5),
+            SimpleNamespace(bot_notification_lease_seconds=120),
             database={config.mongo.jobs_collection: self.store},
         )
 
-    async def test_flood_wait_at_last_attempt_preserves_budget_and_server_delay(self):
+    async def test_flood_wait_ends_this_delivery_without_rescheduling(self):
         error = TelegramRetryAfter(
             method=SendMessage(chat_id=12, text='test'), message='FloodWait', retry_after=300,
         )
-        before = datetime.now(timezone.utc)
-        self.assertTrue(await self.service.fail_completion('job-1', 'send-token', 5, error))
+        self.assertTrue(await self.service.fail_completion('job-1', 'send-token', error, send_started=True))
         outbox = self.store.document['completion_outbox']
-        self.assertEqual(outbox['state'], 'pending')
-        self.assertEqual(outbox['attempts'], 4)
+        self.assertEqual(outbox['state'], 'failed')
+        self.assertEqual(outbox['attempts'], 1)
         self.assertEqual(outbox['error_kind'], 'rate_limited')
-        self.assertGreaterEqual(outbox['available_at'], before + timedelta(seconds=300))
+        self.assertIsNone(outbox['available_at'])
+        self.assertIsNone(await self.service.claim_completion())
 
     async def test_permanent_refusal_stops_immediately_without_render_changes(self):
         error = TelegramForbiddenError(
             method=SendMessage(chat_id=12, text='test'), message='bot blocked',
         )
-        await self.service.fail_completion('job-1', 'send-token', 1, error)
+        await self.service.fail_completion('job-1', 'send-token', error, send_started=True)
         self.assertEqual(self.store.document['completion_outbox']['state'], 'failed')
         self.assertEqual(self.store.document['completion_outbox']['error_kind'], 'permanent')
         self.assertEqual(self.store.document['status'], 'completed')
         self.assertEqual(self.store.document['result']['key'], 'jobs/job-1/result.jpg')
 
     async def test_expired_owner_cannot_change_new_delivery_claim(self):
-        self.assertFalse(await self.service.fail_completion('job-1', 'old-token', 1, OSError('offline')))
+        self.assertFalse(await self.service.fail_completion('job-1', 'old-token', OSError('offline')))
         self.assertEqual(self.store.document['completion_outbox']['state'], 'claimed')
         self.assertEqual(self.store.document['completion_outbox']['token'], 'send-token')
 
@@ -115,11 +147,53 @@ class TestDeliveryFailures(unittest.IsolatedAsyncioTestCase):
             repair['available_at'] - datetime.now(timezone.utc),
             timedelta(seconds=config.bot.history_repair_retry_max_seconds),
         )
-        self.assertEqual(self.store.document['completion_outbox']['attempts'], 5)
+        self.assertEqual(self.store.document['completion_outbox']['attempts'], 1)
         self.assertEqual(self.store.document['completion_outbox']['state'], 'claimed')
 
     def test_long_outage_cannot_overflow_exponential_backoff(self):
         self.assertEqual(bounded_backoff(999999, 2, 2, 60), 60)
+
+    async def test_lost_transport_response_is_uncertain_and_cannot_be_reclaimed(self):
+        await self.service.fail_completion('job-1', 'send-token', TimeoutError('response lost'), send_started=True)
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+        self.assertIsNone(await self.service.claim_completion())
+
+    async def test_preparation_failure_is_definite_and_cannot_be_reclaimed(self):
+        await self.service.fail_completion('job-1', 'send-token', OSError('MinIO offline'))
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'failed')
+        self.assertIsNone(await self.service.claim_completion())
+
+    async def test_expired_started_send_becomes_uncertain_without_reclaim(self):
+        self.store.document['completion_outbox']['lease_until'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.assertIsNone(await self.service.claim_completion())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+        self.assertIsNone(await self.service.claim_completion())
+
+    async def test_old_pending_retry_cannot_restart_a_previous_send(self):
+        self.store.document['completion_outbox']['state'] = 'pending'
+        self.assertIsNone(await self.service.claim_completion())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+
+    async def test_preparation_reclaim_fences_the_previous_owner(self):
+        self.store.document['completion_outbox'].update(
+            state='preparing', attempts=0,
+            lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        claimed = await self.service.claim_completion()
+        token = claimed['completion_outbox']['token']
+        self.assertNotEqual(token, 'send-token')
+        self.assertFalse(await self.service.mark_delivery_started('job-1', 'send-token'))
+        self.assertTrue(await self.service.mark_delivery_started('job-1', token))
+        self.assertFalse(await self.service.mark_delivery_started('job-1', token))
+        self.assertIsNone(await self.service.claim_completion())
+        self.assertEqual(self.store.document['completion_outbox']['attempts'], 1)
+
+    async def test_known_telegram_success_can_acknowledge_the_same_expired_send(self):
+        self.store.document['completion_outbox']['state'] = 'uncertain'
+        self.assertFalse(await self.service.acknowledge_completion('job-1', 'old-token', 77))
+        self.assertTrue(await self.service.acknowledge_completion('job-1', 'send-token', 77))
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'sent')
+        self.assertEqual(self.store.document['completion_outbox']['message_id'], 77)
 
 
 class TestIndependentProjection(unittest.IsolatedAsyncioTestCase):
@@ -130,6 +204,7 @@ class TestIndependentProjection(unittest.IsolatedAsyncioTestCase):
                                    telegram_max_document_size_bytes=100,
                                    bot_notification_poll_seconds=0.01),
             claim_completion=AsyncMock(return_value=self.job),
+            mark_delivery_started=AsyncMock(return_value=True),
             renew_completion=AsyncMock(return_value=True),
             acknowledge_completion=AsyncMock(return_value=True),
             fail_completion=AsyncMock(),
@@ -205,6 +280,35 @@ class TestIndependentProjection(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.notifier.deliver_once())
         self.service.claim_completion.assert_awaited_once()
 
+    async def test_confirmed_send_is_not_reported_failed_when_mongo_acknowledgement_fails(self):
+        self.service.acknowledge_completion.side_effect = OSError('Mongo unavailable')
+        await self.notifier.deliver_once()
+        self.bot.send_document.assert_awaited_once()
+        self.service.fail_completion.assert_not_awaited()
+
+    async def test_confirmed_send_is_not_reported_failed_when_acknowledgement_lease_expired(self):
+        self.service.acknowledge_completion.return_value = False
+        await self.notifier.deliver_once()
+        self.bot.send_document.assert_awaited_once()
+        self.service.fail_completion.assert_not_awaited()
+
+    async def test_pre_send_fence_failure_prevents_telegram_io(self):
+        self.service.mark_delivery_started.return_value = False
+        await self.notifier.deliver_once()
+        self.bot.send_document.assert_not_awaited()
+        self.service.fail_completion.assert_awaited_once()
+        self.assertFalse(self.service.fail_completion.await_args.kwargs['send_started'])
+
+    async def test_failed_generation_edits_existing_progress_without_an_extra_message(self):
+        self.job.update(status='failed', result=None)
+        self.notifier.progress = SimpleNamespace(fail_generation=AsyncMock(return_value=456))
+        await self.notifier.deliver_once()
+        self.notifier.progress.fail_generation.assert_awaited_once_with(self.job)
+        self.bot.send_message.assert_not_awaited()
+        self.bot.send_document.assert_not_awaited()
+        self.service.acknowledge_completion.assert_awaited_once_with('job-1', 'send-token', 456)
+
+
     async def test_slow_history_does_not_block_delivery_loop(self):
         history_entered, release_history, delivered = (asyncio.Event() for _ in range(3))
         stop = asyncio.Event()
@@ -231,6 +335,63 @@ class TestIndependentProjection(unittest.IsolatedAsyncioTestCase):
             release_history.set()
             await asyncio.wait_for(task, 1)
 
+
+class TestSingleSendCrashSafety(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        document = job_document()
+        document['completion_outbox'].update(state='pending', attempts=0)
+        self.store = MutableJob(document)
+        self.service = ImagerService(
+            SimpleNamespace(bot_notification_lease_seconds=120,
+                            telegram_max_document_size_bytes=100),
+            database={config.mongo.jobs_collection: self.store},
+            object_store=SimpleNamespace(download_result=lambda ref, path, **kw: Path(path).write_bytes(b'result')),
+        )
+        self.bot = SimpleNamespace(
+            send_document=AsyncMock(return_value=SimpleNamespace(message_id=77)),
+            send_message=AsyncMock(),
+        )
+
+    async def test_notifier_restart_after_lost_response_never_resends(self):
+        self.bot.send_document.side_effect = TimeoutError('Telegram response lost')
+        first = GenerationNotifier(self.service, self.bot, object())
+        self.assertTrue(await first.deliver_once())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+        restarted = GenerationNotifier(self.service, self.bot, object())
+        self.assertFalse(await restarted.deliver_once())
+        self.bot.send_document.assert_awaited_once()
+
+    async def test_cancellation_during_send_never_resends_after_lease_expiry(self):
+        self.bot.send_document.side_effect = asyncio.CancelledError()
+        first = GenerationNotifier(self.service, self.bot, object())
+        with self.assertRaises(asyncio.CancelledError):
+            await first.deliver_once()
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'claimed')
+        self.store.document['completion_outbox']['lease_until'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        restarted = GenerationNotifier(self.service, self.bot, object())
+        self.assertFalse(await restarted.deliver_once())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+        self.bot.send_document.assert_awaited_once()
+
+    async def test_preparation_crash_before_send_can_recover(self):
+        claimed = await self.service.claim_completion()
+        self.assertEqual(claimed['completion_outbox']['state'], 'preparing')
+        self.store.document['completion_outbox']['lease_until'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        restarted = GenerationNotifier(self.service, self.bot, object())
+        self.assertTrue(await restarted.deliver_once())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'sent')
+        self.bot.send_document.assert_awaited_once()
+
+    async def test_restart_after_known_send_but_unavailable_mongo_does_not_resend(self):
+        self.service.acknowledge_completion = AsyncMock(side_effect=OSError('Mongo unavailable'))
+        first = GenerationNotifier(self.service, self.bot, object())
+        self.assertTrue(await first.deliver_once())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'claimed')
+        self.store.document['completion_outbox']['lease_until'] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        restarted = GenerationNotifier(self.service, self.bot, object())
+        self.assertFalse(await restarted.deliver_once())
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'uncertain')
+        self.bot.send_document.assert_awaited_once()
 
 class TestFrozenSubmission(unittest.IsolatedAsyncioTestCase):
     async def test_retry_uses_original_manifest_policy_and_workflow_prefix(self):

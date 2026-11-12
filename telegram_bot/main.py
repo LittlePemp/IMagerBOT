@@ -21,6 +21,7 @@ from imager_config.loader import config
 from settings import settings
 from src.application.admission import AdmissionDispatcher
 from src.application.generation import SubmitGeneration
+from src.application.generation_progress import GenerationProgress
 from src.application.catalog_projection import CatalogImportProjection
 from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import register_handlers_admin_panel
@@ -28,7 +29,6 @@ from src.commands.admin_panel.user_management import register_handlers_user_mana
 from src.commands.admin_panel.image_build_params.image_build_params_handler import register_handlers_image_build_params
 from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
 from src.commands.main_menu import register_handlers_main_menu, register_fallback
-from src.commands.jobs import register_handlers_jobs
 from src.commands.admin_panel.pack_import import register_handlers_pack_import, register_pack_import_command
 from src.commands.support.support_handler import register_handlers_support
 from src.infrastructure.data.unit_of_work import get_uow
@@ -50,7 +50,7 @@ class SharedClientStorage(PyMongoStorage):
         pass
 
 
-def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None):
+def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None):
     gate = upload_gate or UploadGate()
     # Register FSM after the cheap abuse gate, before database-backed actor/UI.
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
@@ -60,6 +60,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None):
     dp['generation_service'] = SubmitGeneration(
         repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids,
     )
+    dp['generation_progress'] = progress
     dp.update.outer_middleware(ErrorBoundaryMiddleware())
     dp.update.outer_middleware(AbuseControlMiddleware())
     dp.update.outer_middleware(dp.fsm)
@@ -69,7 +70,6 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None):
     dp.callback_query.outer_middleware(NavigationMiddleware())
     dp.message.outer_middleware(ConversationExpiryMiddleware())
     register_handlers_main_menu(dp)
-    register_handlers_jobs(dp)
     register_pack_import_command(dp)
     register_handlers_about(dp)
     register_handlers_support(dp)
@@ -123,16 +123,20 @@ async def main():
         except Exception:
             exception_logger.exception('Core catalog unavailable during bot startup')
         gate = UploadGate()
+        progress = GenerationProgress(
+            repositories.generation_progress_repository, repositories.admission_repository,
+            imager_service, bot,
+        )
         dispatcher = create_dispatcher(repositories, imager_service, upload_gate=gate, storage=SharedClientStorage(
             client, db_name=settings.database_name, collection_name=config.mongo.bot_fsm_collection,
-        ))
+        ), progress=progress)
         imports = dispatcher['catalog_import_service']
         await imports.ensure_indexes()
-        notifier = GenerationNotifier(imager_service, bot, repositories.generation_history_repository)
+        notifier = GenerationNotifier(imager_service, bot, repositories.generation_history_repository, progress=progress)
         admission = AdmissionDispatcher(repositories.admission_repository, imager_service, publication_lock=gate.admission_lock)
         projection = CatalogImportProjection(imports, repositories.image_group_repository)
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
-                 asyncio.create_task(projection.run(stop))]
+                 asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop))]
         await bot.delete_webhook(drop_pending_updates=False)
         await dispatcher.start_polling(
             bot, close_bot_session=False, allowed_updates=['message', 'callback_query'],

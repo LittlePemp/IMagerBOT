@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from imager_config.loader import config
@@ -78,8 +79,43 @@ class BotObjectStorage:
         info = self.client.stat_object(self.bucket, key)
         if info.size != size:
             raise ValueError('Stored result size does not match its reference')
-        self.client.fget_object(self.bucket, key, str(path))
-        if os.path.getsize(path) != size or self.sha256_file(path) != checksum:
-            Path(path).unlink(missing_ok=True)
-            raise ValueError('Downloaded result checksum does not match its reference')
-        return str(path)
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=config.storage.download_temp_prefix, dir=target.parent,
+        )
+        response = None
+        try:
+            try:
+                response = self.client.get_object(self.bucket, key)
+                digest, downloaded = hashlib.sha256(), 0
+                with os.fdopen(descriptor, 'wb') as stream:
+                    descriptor = None
+                    while True:
+                        chunk = response.read(min(
+                            config.storage.transfer_chunk_bytes, size - downloaded + 1,
+                        ))
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > size or downloaded > max_bytes:
+                            raise ValueError('Downloaded result exceeds its declared size limit')
+                        digest.update(chunk)
+                        stream.write(chunk)
+                if downloaded != size or digest.hexdigest() != checksum:
+                    raise ValueError('Downloaded result checksum or size does not match its reference')
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    finally:
+                        response.release_conn()
+            # The caller's destination survives corrupt or truncated downloads.
+            os.replace(temporary, target)
+            temporary = None
+            return str(path)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if temporary is not None:
+                Path(temporary).unlink(missing_ok=True)

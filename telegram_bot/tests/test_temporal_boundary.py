@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import hashlib
+import io
 import tempfile
 import unittest
 from dataclasses import replace
@@ -116,10 +117,28 @@ class TestSubmission(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.database.jobs.documents, {})
 
 
+class ObjectResponse(io.BytesIO):
+    def __init__(self, data):
+        super().__init__(data)
+        self.consumed = 0
+        self.read_sizes = []
+        self.released = False
+
+    def read(self, size=-1):
+        self.read_sizes.append(size)
+        value = super().read(size)
+        self.consumed += len(value)
+        return value
+
+    def release_conn(self):
+        self.released = True
+
+
 class Minio:
     def __init__(self):
         self.objects = {}
         self.parallelism = []
+        self.responses = []
 
     def bucket_exists(self, bucket):
         return True
@@ -131,8 +150,10 @@ class Minio:
     def stat_object(self, bucket, key):
         return SimpleNamespace(size=len(self.objects[(bucket, key)]))
 
-    def fget_object(self, bucket, key, path):
-        Path(path).write_bytes(self.objects[(bucket, key)])
+    def get_object(self, bucket, key):
+        response = ObjectResponse(self.objects[(bucket, key)])
+        self.responses.append(response)
+        return response
 
 
 class TestObjectStorage(unittest.TestCase):
@@ -179,11 +200,18 @@ class TestObjectStorage(unittest.TestCase):
         storage = BotObjectStorage('', '', '', 'imager', client=client)
         result = reference('jobs/job-1/attempts/token/result.jpg', b'correct')
         client.objects[('imager', result['key'])] = b'invalid'
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / 'result.jpg'
-            with self.assertRaisesRegex(ValueError, 'checksum'):
-                storage.download_result(result, output, max_bytes=100)
-            self.assertFalse(output.exists())
+        for previous in (None, b'previous-destination'):
+            with self.subTest(previous=previous), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'result.jpg'
+                if previous is not None:
+                    output.write_bytes(previous)
+                with self.assertRaisesRegex(ValueError, 'checksum'):
+                    storage.download_result(result, output, max_bytes=100)
+                if previous is None:
+                    self.assertFalse(output.exists())
+                else:
+                    self.assertEqual(output.read_bytes(), previous)
+                self.assertEqual(list(Path(directory).iterdir()), [output] if previous else [])
 
     def test_size_limit_is_checked_before_download(self):
         client = Minio()
@@ -192,6 +220,104 @@ class TestObjectStorage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'size limit'):
             storage.download_result(result, 'unused.jpg', max_bytes=1)
         self.assertEqual(client.objects, {})
+
+    def test_stream_is_bounded_and_connection_released_after_success(self):
+        from src.infrastructure.services.object_storage import minio_storage
+
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'abcdef')
+        client.objects[('imager', result['key'])] = b'abcdef'
+        configured = replace(config, storage=replace(config.storage, transfer_chunk_bytes=3))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            with patch.object(minio_storage, 'config', configured):
+                storage.download_result(result, output, max_bytes=6)
+            self.assertEqual(output.read_bytes(), b'abcdef')
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+        response = client.responses[0]
+        self.assertEqual(response.consumed, 6)
+        self.assertLessEqual(max(response.read_sizes), 3)
+        self.assertTrue(response.closed)
+        self.assertTrue(response.released)
+
+    def test_object_growth_after_stat_stops_at_limit_and_preserves_destination(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'correct')
+        client.objects[('imager', result['key'])] = b'correct' + b'x' * 10000
+        client.stat_object = Mock(return_value=SimpleNamespace(size=result['size_bytes']))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            output.write_bytes(b'previous-destination')
+            with self.assertRaisesRegex(ValueError, 'size limit'):
+                storage.download_result(result, output, max_bytes=result['size_bytes'])
+            self.assertEqual(output.read_bytes(), b'previous-destination')
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+        response = client.responses[0]
+        self.assertEqual(response.consumed, result['size_bytes'] + 1)
+        self.assertTrue(response.closed)
+        self.assertTrue(response.released)
+
+    def test_truncated_object_after_stat_does_not_publish_partial_destination(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'correct')
+        client.objects[('imager', result['key'])] = b'cor'
+        client.stat_object = Mock(return_value=SimpleNamespace(size=result['size_bytes']))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            with self.assertRaisesRegex(ValueError, 'size'):
+                storage.download_result(result, output, max_bytes=100)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        self.assertTrue(client.responses[0].closed)
+        self.assertTrue(client.responses[0].released)
+
+    def test_broken_stream_is_closed_and_transfer_file_removed(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'correct')
+        client.objects[('imager', result['key'])] = b'correct'
+        response = Mock()
+        response.read.side_effect = [b'cor', OSError('connection interrupted')]
+        client.get_object = Mock(return_value=response)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            with self.assertRaisesRegex(OSError, 'connection interrupted'):
+                storage.download_result(result, output, max_bytes=100)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        response.close.assert_called_once()
+        response.release_conn.assert_called_once()
+
+    def test_get_failure_cleans_transfer_file_and_preserves_destination(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'correct')
+        client.objects[('imager', result['key'])] = b'correct'
+        client.get_object = Mock(side_effect=OSError('storage unavailable'))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            output.write_bytes(b'previous-destination')
+            with self.assertRaisesRegex(OSError, 'storage unavailable'):
+                storage.download_result(result, output, max_bytes=100)
+            self.assertEqual(output.read_bytes(), b'previous-destination')
+            self.assertEqual(list(Path(directory).iterdir()), [output])
+
+    def test_close_failure_still_releases_connection_and_removes_transfer(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        result = reference(data=b'correct')
+        client.objects[('imager', result['key'])] = b'correct'
+        response = Mock()
+        response.read.side_effect = [b'correct', b'']
+        response.close.side_effect = OSError('close failed')
+        client.get_object = Mock(return_value=response)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'result.jpg'
+            with self.assertRaisesRegex(OSError, 'close failed'):
+                storage.download_result(result, output, max_bytes=100)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        response.release_conn.assert_called_once()
 
 
 class TestNotifier(unittest.IsolatedAsyncioTestCase):
@@ -216,6 +342,7 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         self.service = SimpleNamespace(
             config=self.config,
             claim_completion=AsyncMock(return_value=self.job),
+            mark_delivery_started=AsyncMock(return_value=True),
             renew_completion=AsyncMock(return_value=True),
             acknowledge_completion=AsyncMock(return_value=True),
             fail_completion=AsyncMock(),
@@ -300,12 +427,15 @@ class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
         state = SimpleNamespace(get_data=AsyncMock(return_value={'generation_mode': 'manual'}), clear=AsyncMock())
         receipt = AdmissionReceipt('job-1', 'pending', '2026-11-12', 'hash', actor_id=1)
         service = SimpleNamespace(execute=AsyncMock(return_value=receipt), gateway=object())
+        progress = SimpleNamespace(watch=AsyncMock())
         with patch.object(upload, 'render_view', AsyncMock()) as render:
-            await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service)
+            await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service, progress)
         context = service.execute.await_args.kwargs['client_context']
         self.assertEqual(context['chat_id'], 12)
         self.assertEqual(context['reply_to_message_id'], 34)
-        self.assertIn('Изображение принято', render.await_args.args[2])
+        render.assert_not_awaited()
+        progress.watch.assert_awaited_once_with(message, job_id='job-1', actor_id=1, duplicate=False)
+        message.answer.assert_not_awaited()
         state.clear.assert_awaited_once()
 
     async def test_daily_quota_rejection_keeps_draft_and_does_not_acknowledge_acceptance(self):
@@ -315,6 +445,10 @@ class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock())
         state = SimpleNamespace(get_data=AsyncMock(return_value={}), clear=AsyncMock())
         service = SimpleNamespace(execute=AsyncMock(side_effect=DailyQuotaExceeded(5, datetime.now(timezone.utc))), gateway=object())
-        await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service)
+        progress = SimpleNamespace(watch=AsyncMock())
+        with patch.object(upload, 'render_view', AsyncMock()) as render:
+            await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service, progress)
         state.clear.assert_not_awaited()
+        render.assert_not_awaited()
+        progress.watch.assert_not_awaited()
         self.assertIn('полночь', message.answer.await_args.args[0])

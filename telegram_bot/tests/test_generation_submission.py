@@ -138,20 +138,85 @@ class TestGenerationSubmission(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBoundedTelegramSource(unittest.IsolatedAsyncioTestCase):
-    async def test_unknown_declared_size_cannot_bypass_streaming_limit(self):
-        from src.commands.image_generation import upload
-        async def download(remote, destination, **kwargs):
-            destination.write(b'abcd')
-        message = SimpleNamespace(photo=[SimpleNamespace(file_id='file')], bot=SimpleNamespace(
-            get_file=AsyncMock(return_value=SimpleNamespace(file_path='path', file_size=None)),
+    def source(self, *, local=False, download=None):
+        from pathlib import Path
+
+        path = str(Path(config.pack_import.bot_api_container_directory) / 'photo.jpg') if local else 'path'
+        message = SimpleNamespace(photo=[SimpleNamespace(file_id='file', file_size=None)], bot=SimpleNamespace(
+            session=SimpleNamespace(api=SimpleNamespace(is_local=local)),
+            get_file=AsyncMock(return_value=SimpleNamespace(file_path=path, file_size=None)),
             download_file=AsyncMock(side_effect=download),
         ))
-        gateway = SimpleNamespace(upload_source=AsyncMock())
-        policy = replace(config, limits=replace(config.limits, source_file_bytes=3))
-        with patch.object(upload, 'config', policy):
+        return message, SimpleNamespace(upload_source=AsyncMock(return_value={'uploaded': True}))
+
+    def policy(self):
+        return replace(config, limits=replace(config.limits, source_file_bytes=3))
+
+    def required_space(self, policy):
+        return policy.bot.source_disk_headroom_bytes + policy.limits.source_file_bytes * policy.bot.max_concurrent_uploads
+
+    async def test_unknown_declared_size_cannot_bypass_streaming_limit(self):
+        from src.commands.image_generation import upload
+
+        async def download(remote, destination, **kwargs):
+            destination.write(b'abcd')
+
+        message, gateway = self.source(download=download)
+        policy = self.policy()
+        with patch.object(upload, 'config', policy), patch.object(upload.shutil, 'disk_usage',
+                return_value=SimpleNamespace(free=self.required_space(policy))):
             with self.assertRaises(ValueError):
                 await upload.TelegramPhotoSource(message, gateway)('job-1')
         gateway.upload_source.assert_not_awaited()
+
+    async def test_low_disk_space_rejects_before_requesting_a_telegram_file(self):
+        from src.commands.image_generation import upload
+
+        message, gateway = self.source()
+        policy = self.policy()
+        with patch.object(upload, 'config', policy), patch.object(upload.shutil, 'disk_usage',
+                return_value=SimpleNamespace(free=self.required_space(policy) - 1)):
+            with self.assertRaisesRegex(ValueError, 'Недостаточно свободного места'):
+                await upload.TelegramPhotoSource(message, gateway)('job-1')
+        message.bot.get_file.assert_not_awaited()
+        message.bot.download_file.assert_not_awaited()
+        gateway.upload_source.assert_not_awaited()
+
+    async def test_disk_space_is_rechecked_after_telegram_prepares_the_file(self):
+        from src.commands.image_generation import upload
+
+        message, gateway = self.source()
+        policy = self.policy()
+        required = self.required_space(policy)
+        with patch.object(upload, 'config', policy), patch.object(upload.shutil, 'disk_usage', side_effect=[
+            SimpleNamespace(free=required), SimpleNamespace(free=required - 1),
+        ]) as disk_usage:
+            with self.assertRaisesRegex(ValueError, 'Недостаточно свободного места'):
+                await upload.TelegramPhotoSource(message, gateway)('job-1')
+        message.bot.get_file.assert_awaited_once_with('file')
+        self.assertEqual(disk_usage.call_count, 2)
+        message.bot.download_file.assert_not_awaited()
+        gateway.upload_source.assert_not_awaited()
+
+    async def test_local_api_checks_both_cache_and_temporary_filesystem_before_and_after_get_file(self):
+        from collections import Counter
+        from pathlib import Path
+        import tempfile
+        from src.commands.image_generation import upload
+
+        async def download(remote, destination, **kwargs):
+            destination.write(b'abc')
+
+        message, gateway = self.source(local=True, download=download)
+        policy = self.policy()
+        roots = {Path(tempfile.gettempdir()), Path(policy.pack_import.bot_api_container_directory)}
+        with patch.object(upload, 'config', policy), patch.object(upload.shutil, 'disk_usage',
+                return_value=SimpleNamespace(free=self.required_space(policy))) as disk_usage:
+            self.assertEqual(await upload.TelegramPhotoSource(message, gateway)('job-1'), {'uploaded': True})
+        self.assertEqual(Counter(call.args[0] for call in disk_usage.call_args_list), Counter({root: 2 for root in roots}))
+        message.bot.get_file.assert_awaited_once_with('file')
+        message.bot.download_file.assert_awaited_once()
+        gateway.upload_source.assert_awaited_once()
 
 
 class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
@@ -181,49 +246,46 @@ class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(private_id.replace('-', ''), text)
         self.assertNotIn('задан', text.casefold())
 
-    async def test_accepted_and_duplicate_messages_keep_identity_only_in_server_actions(self):
+    async def test_accepted_and_duplicate_submissions_start_progress_without_a_separate_menu_screen(self):
         from src.commands.image_generation import upload
         private_id = upload.generation_job_id(self.message)
         for duplicate in (False, True):
             with self.subTest(duplicate=duplicate):
+                self.state.clear.reset_mock()
                 receipt = SimpleNamespace(job_id=private_id, duplicate=duplicate)
                 service = SimpleNamespace(execute=AsyncMock(return_value=receipt), gateway=object())
-                await upload.receive_image(self.message, self.state, self.user, service)
-                rendered = self.session.last[1]
-                self.assert_public(rendered.text, private_id)
-                buttons = [button for row in rendered.reply_markup.inline_keyboard for button in row]
-                self.assertIn('Статус изображения', [button.text for button in buttons])
-                for button in buttons:
-                    self.assert_public(button.text, private_id)
-                    self.assertNotIn(private_id, button.callback_data)
-                records = self.state.update_data.await_args.kwargs['_current_view']['records']
-                self.assertIn(f'job_status:{private_id}', records.values())
+                progress = SimpleNamespace(watch=AsyncMock())
+                with patch.object(upload, 'render_view', AsyncMock()) as render:
+                    await upload.receive_image(self.message, self.state, self.user, service, progress)
+                render.assert_not_awaited()
+                progress.watch.assert_awaited_once_with(self.message, job_id=private_id, actor_id=1, duplicate=duplicate)
+                self.state.clear.assert_awaited_once()
+                self.assertEqual(self.session.methods, [])
                 context = service.execute.await_args.kwargs['client_context']
                 self.assertTrue(context['display_name'].startswith('Alice_'))
                 self.assert_public(context['display_name'], private_id)
                 self.assertTrue(context['display_name'].endswith('.' + config.render.output_extension))
 
-    async def test_uncertain_acceptance_is_not_claimed_as_success_and_keeps_exact_status_action(self):
+    async def test_uncertain_acceptance_is_tracked_without_buttons_or_a_second_submission(self):
         from src.commands.image_generation import upload
         from src.infrastructure.data.errors import AdmissionUncertain
         private_id = upload.generation_job_id(self.message)
         service = SimpleNamespace(execute=AsyncMock(side_effect=AdmissionUncertain(private_id)), gateway=object())
-        await upload.receive_image(self.message, self.state, self.user, service)
-        rendered = self.session.last[1]
-        self.assert_public(rendered.text, private_id)
-        self.assertIn('не удалось подтвердить', rendered.text)
-        self.assertNotIn('Изображение принято', rendered.text)
-        buttons = [button for row in rendered.reply_markup.inline_keyboard for button in row]
-        self.assertIn('Проверить статус', [button.text for button in buttons])
-        for button in buttons:
-            self.assertNotIn(private_id, button.callback_data)
-        records = self.state.update_data.await_args.kwargs['_current_view']['records']
-        self.assertIn(f'job_status:{private_id}', records.values())
-        self.state.clear.assert_not_awaited()
+        progress = SimpleNamespace(watch=AsyncMock())
+        with patch.object(upload, 'render_view', AsyncMock()) as render:
+            await upload.receive_image(self.message, self.state, self.user, service, progress)
+        render.assert_not_awaited()
+        service.execute.assert_awaited_once()
+        progress.watch.assert_awaited_once_with(self.message, job_id=private_id, actor_id=1)
+        self.state.clear.assert_awaited_once()
+        self.assertEqual(self.session.methods, [])
 
     async def test_raw_identity_in_validation_error_is_not_sent_to_the_user(self):
         from src.commands.image_generation import upload
         private_id = upload.generation_job_id(self.message)
         service = SimpleNamespace(execute=AsyncMock(side_effect=ValueError(f'Задание {private_id} недоступно')), gateway=object())
-        await upload.receive_image(self.message, self.state, self.user, service)
+        progress = SimpleNamespace(watch=AsyncMock())
+        await upload.receive_image(self.message, self.state, self.user, service, progress)
         self.assert_public(self.session.last[1].text, private_id)
+        progress.watch.assert_not_awaited()
+        self.state.clear.assert_not_awaited()

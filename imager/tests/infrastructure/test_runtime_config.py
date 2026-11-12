@@ -199,8 +199,9 @@ class TestRuntimeConfig(unittest.TestCase):
         for content in (
             '[bot]\nnotification_renew_divisor=1',
             '[bot]\nnotification_renew_min_seconds=120',
-            '[bot]\nnotification_retry_initial_seconds=61',
-            '[bot]\nnotification_retry_backoff_coefficient=0.5',
+            '[bot]\nhistory_repair_retry_initial_seconds=301',
+            '[bot]\nhistory_repair_backoff_coefficient=0.5',
+            '[bot]\nprogress_batch_size=63',
             '[bot]\nerror_excerpt_length=2001',
         ):
             with self.subTest(content=content):
