@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from threading import RLock
 from types import SimpleNamespace
 from unittest.mock import patch
+from bson import BSON
+from bson.codec_options import CodecOptions
 from imager_config.loader import config
 
 from imager_contracts import JobRequest, make_submission, payload_fingerprint
@@ -127,6 +129,27 @@ class MemoryCollection:
 
 
 class TestMongoJobs(unittest.TestCase):
+    def test_bson_int64_seed_survives_real_storage_round_trip_and_dispatch(self):
+        self.request['seed'] = 2 ** 32 - 1
+        self.repository.receive(self.request)
+        restored = BSON(BSON.encode(self.collection.documents['job_1'])).decode(
+            codec_options=CodecOptions(tz_aware=True),
+        )
+        self.assertIsNot(type(restored['request']['seed']), int)
+        self.collection.documents['job_1'] = restored
+        event = self.repository.claim_dispatch()
+        canonical = self.repository.validate_dispatch(event)
+        self.assertIs(type(canonical['seed']), int)
+        self.assertEqual(canonical['seed'], 2 ** 32 - 1)
+        self.assertEqual(payload_fingerprint(canonical), restored['payload_hash'])
+
+    def test_seed_canonicalization_does_not_admit_other_numeric_types(self):
+        from bson.int64 import Int64
+        from imager_contracts.protocol import SEED_UPPER_BOUND
+        for seed in (True, False, 1.0, '1', Int64(-1), Int64(SEED_UPPER_BOUND)):
+            with self.subTest(seed=seed), self.assertRaises(ValueError):
+                JobRequest.from_dict(self.request | {'seed': seed})
+
     def test_legacy_policy_and_workflow_identity_are_pinned_before_dispatch(self):
         self.repository.receive(self.request)
         del self.collection.documents['job_1']['execution_policy']

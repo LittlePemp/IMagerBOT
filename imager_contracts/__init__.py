@@ -118,6 +118,11 @@ class JobRequest:
     def from_dict(cls, value):
         try:
             fields = dict(value)
+            # BSON Int64 is an int subclass. Canonicalize its representation
+            # without accepting bool, floats or strings as integer seeds.
+            seed = fields.get('seed')
+            if isinstance(seed, int) and not isinstance(seed, bool):
+                fields['seed'] = int(seed)
             fields['source'] = ObjectRef.from_dict(fields['source'])
             fields['parameters'] = GenerationParameters.from_dict(fields['parameters'])
             fields['catalog_manifest'] = ObjectRef.from_dict(fields['catalog_manifest'])
