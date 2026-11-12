@@ -180,3 +180,4 @@ infra/secrets/
 /1.cmd
 *.ps1
 config/*.local.toml
+/todo.txt
