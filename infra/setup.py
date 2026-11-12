@@ -105,6 +105,8 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
             config.paths.mongo_directory, config.paths.minio_directory,
             config.paths.temporal_directory, config.paths.worker_scratch_directory,
             config.paths.bot_scratch_directory, config.paths.client_temp_directory,
+            config.paths.catalog_import_scratch_directory,
+            config.paths.bot_api_directory, config.paths.bot_api_temp_directory,
         )
         for old in (development_root / name for name in role_directories):
             for new in (data_root / name for name in (*role_directories, production_config.postgres_directory)):
@@ -113,7 +115,8 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
     for directory in (
         config.paths.mongo_directory, config.paths.minio_directory, config.paths.temporal_directory,
         config.paths.worker_scratch_directory, config.paths.bot_scratch_directory,
-        config.paths.client_temp_directory,
+        config.paths.client_temp_directory, config.paths.catalog_import_scratch_directory,
+        config.paths.bot_api_directory, config.paths.bot_api_temp_directory,
     ):
         (data_root / directory).mkdir(parents=True, exist_ok=True)
 
@@ -150,12 +153,19 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
             production_config.minio_console_port if production else config.deployment.minio_console_port),
         'API_TOKEN': values.get('API_TOKEN') or existing_bot.get('API_TOKEN', existing_bot.get('api_token', '')),
         'TELEGRAM_ADMIN_IDS': values.get('TELEGRAM_ADMIN_IDS') or existing_bot.get('TELEGRAM_ADMIN_IDS', existing_bot.get('telegram_admin_ids', '')),
+        # Telegram application credentials are supplied by the operator. They
+        # cannot be randomly generated like Mongo/MinIO passwords.
+        'TELEGRAM_API_ID': values.get('TELEGRAM_API_ID') or existing_bot.get('TELEGRAM_API_ID', ''),
+        'TELEGRAM_API_HASH': values.get('TELEGRAM_API_HASH') or existing_bot.get('TELEGRAM_API_HASH', ''),
         'IMAGER_IMPORT_ROOT': values.get('IMAGER_IMPORT_ROOT') or (project_root / config.paths.image_groups).as_posix(),
         'IMAGER_MONGO_DATA_PATH': (data_root / config.paths.mongo_directory).as_posix(),
         'IMAGER_MINIO_DATA_PATH': (data_root / config.paths.minio_directory).as_posix(),
         'IMAGER_TEMPORAL_DATA_PATH': (data_root / config.paths.temporal_directory).as_posix(),
         'IMAGER_WORKER_SCRATCH_PATH': (data_root / config.paths.worker_scratch_directory).as_posix(),
         'IMAGER_BOT_SCRATCH_PATH': (data_root / config.paths.bot_scratch_directory).as_posix(),
+        'IMAGER_IMPORT_SCRATCH_PATH': (data_root / config.paths.catalog_import_scratch_directory).as_posix(),
+        'IMAGER_BOT_API_DATA_PATH': (data_root / config.paths.bot_api_directory).as_posix(),
+        'IMAGER_BOT_API_TEMP_PATH': (data_root / config.paths.bot_api_temp_directory).as_posix(),
         'IMAGER_TEMPORAL_UI_AUTH_FILE': auth_path.as_posix(),
         'IMAGER_TEMPORAL_NAMESPACE': config.temporal.namespace,
     })

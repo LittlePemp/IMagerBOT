@@ -26,6 +26,7 @@ class GenerationAccepted(BaseModel):
 class GroupInfo(BaseModel):
     group: str
     count: int
+    display_name: str | None = None
 
 
 class ListGroupsResponse(BaseModel):

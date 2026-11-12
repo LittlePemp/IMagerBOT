@@ -19,6 +19,7 @@ async def render_groups(event, state, uow, page=0):
         for index, group in visible
     ]
     buttons.extend(page_buttons(page, last, 'groups'))
+    buttons.extend([('Загрузить ZIP-пак', 'pack_import', 0), ('Мои импорты', 'pack_imports', 0)])
     buttons.extend([('Обновить список из ядра', 'groups_sync', 0), ('Назад', 'params', 0)])
     await show(event, state,
                f'Библиотеки. Страница {page + 1}/{last + 1}.\n'

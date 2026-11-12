@@ -158,10 +158,10 @@ class ImagerService:
 
     async def list_groups(self):
         documents = await asyncio.to_thread(
-            lambda: list(self.database[runtime_config.mongo.catalog_collection].find({}, {'group': 1, 'count': 1}))
+            lambda: list(self.database[runtime_config.mongo.catalog_collection].find({}, {'group': 1, 'count': 1, 'display_name': 1}))
         )
         return ListGroupsResponse(groups=[
-            GroupInfo(group=item.get('group', item['_id']), count=item['count'])
+            GroupInfo(group=item.get('group', item['_id']), count=item['count'], display_name=item.get('display_name'))
             for item in documents if item.get('count', 0) > 0
         ])
 

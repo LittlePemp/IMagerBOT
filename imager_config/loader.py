@@ -190,6 +190,34 @@ def _validate(config):
         raise ConfigurationError('render.output_filename_template produces an oversized filename')
 
     bot, generation = config.bot, config.generation
+    imports = config.pack_import
+    if (not imports.bot_api_container_directory.startswith('/')
+            or imports.bot_api_container_directory == '/'
+            or '..' in imports.bot_api_container_directory.split('/')):
+        raise ConfigurationError('Local Bot API files require a dedicated absolute container directory')
+    if imports.task_queue == config.temporal.task_queue:
+        raise ConfigurationError('Catalog imports require a separate Temporal task queue')
+    if imports.jobs_collection in (config.mongo.jobs_collection, config.mongo.catalog_collection):
+        raise ConfigurationError('Catalog import jobs require their own collection')
+    if not (imports.max_file_bytes <= config.limits.source_file_bytes
+            and imports.max_file_bytes <= imports.max_expanded_bytes
+            and imports.extract_chunk_bytes <= config.limits.memory_headroom_bytes):
+        raise ConfigurationError('Catalog import file/chunk bounds exceed core resource limits')
+    if not (imports.max_central_directory_bytes <= imports.max_archive_bytes
+            and imports.max_entries <= config.catalog.max_images):
+        raise ConfigurationError('Catalog archive metadata limits exceed catalog bounds')
+    if not set(imports.allowed_compression_methods).issubset({0, 8}) or not imports.allowed_compression_methods:
+        raise ConfigurationError('Only stored and deflated ZIP entries are supported')
+    if not (config.jobs.heartbeat_interval_seconds < imports.heartbeat_seconds < imports.lease_seconds):
+        raise ConfigurationError('Catalog import heartbeat must fit its execution lease')
+    if not (imports.activity_timeout_seconds <= imports.schedule_timeout_seconds
+            and imports.retry_initial_seconds <= imports.retry_max_seconds
+            and imports.max_pending_per_admin <= imports.max_pending_global):
+        raise ConfigurationError('Catalog import scheduling limits are inconsistent')
+    for name in ('archive_filename', 'extraction_directory'):
+        _basename(getattr(imports, name), f'pack_import.{name}')
+    _key_template(imports.archive_key_template, {'import_id', 'sha256'}, 'pack_import.archive_key_template',
+                  {'import_id': 'i' * JOB_ID_MAX_LENGTH, 'sha256': 'a' * 64}, OBJECT_KEY_MAX_LENGTH)
     if not 0 < bot.notification_retry_jitter_ratio <= 1:
         raise ConfigurationError('bot.notification_retry_jitter_ratio must be at most one')
     if bot.history_repair_retry_initial_seconds > bot.history_repair_retry_max_seconds:

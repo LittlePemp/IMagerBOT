@@ -1,0 +1,117 @@
+# Opt-in integration fixture. Use a unique -p imager-pack-smoke-<id> project.
+# All credentials are test-only; no production environment file is used.
+name: imager-pack-smoke
+
+x-smoke-logging: &smoke-logging
+  driver: local
+  options:
+    max-size: 2m
+    max-file: '2'
+
+x-smoke-environment: &smoke-environment
+  MONGODB_URI: mongodb://mongodb:27017
+  DATABASE_NAME: imager_pack_smoke
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: imager-pack-smoke-user
+  MINIO_SECRET_KEY: imager-pack-smoke-password
+  MINIO_BUCKET: imager-pack-smoke
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: imager-pack-smoke
+  TEMPORAL_TLS_ENABLED: 'false'
+  TMPDIR: /tmp
+
+x-smoke-dependencies: &smoke-dependencies
+  mongodb:
+    condition: service_healthy
+  minio:
+    condition: service_healthy
+  temporal:
+    condition: service_healthy
+
+services:
+  mongodb:
+    image: mongo:7.0
+    logging: *smoke-logging
+    command: ['mongod', '--bind_ip_all', '--wiredTigerCacheSizeGB', '0.25']
+    mem_limit: 384000000
+    cpus: 1
+    volumes:
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/mongo:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "quit(db.adminCommand('ping').ok ? 0 : 1)"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  minio:
+    image: imager-temporal/minio:2025-10-15
+    logging: *smoke-logging
+    mem_limit: 256000000
+    cpus: 1
+    environment:
+      MINIO_ROOT_USER: imager-pack-smoke-user
+      MINIO_ROOT_PASSWORD: imager-pack-smoke-password
+    command: ['server', '/data']
+    volumes:
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/minio:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:9000/minio/health/ready']
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  temporal:
+    image: temporalio/temporal:1.10.0
+    logging: *smoke-logging
+    mem_limit: 512000000
+    cpus: 1
+    user: '0:0'
+    command:
+      - server
+      - start-dev
+      - --ip
+      - 0.0.0.0
+      - --namespace
+      - imager-pack-smoke
+      - --db-filename
+      - /data/temporal.db
+    volumes:
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/temporal:/data
+    healthcheck:
+      test: ['CMD', 'temporal', 'operator', 'cluster', 'health', '--address', '127.0.0.1:7233']
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  catalog-import-worker:
+    image: imager-temporal/core:local
+    logging: *smoke-logging
+    command: ['python', '-m', 'src.presentation.temporal.import_worker']
+    environment:
+      <<: *smoke-environment
+      TEMPORAL_WORKER_IDENTITY: imager-pack-smoke-import-worker
+    depends_on: *smoke-dependencies
+    mem_limit: 1000000000
+    cpus: 1
+    init: true
+    stop_grace_period: 30s
+    volumes:
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/worker:/tmp
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/worker-logs:/app/imager/logs
+
+  smoke:
+    image: imager-temporal/core:local
+    logging: *smoke-logging
+    command: ['python', 'tests/integration/smoke_catalog_import.py']
+    profiles: ['tools']
+    environment:
+      <<: *smoke-environment
+      IMAGER_PACK_SMOKE_ALLOW: 'isolated-fixture'
+      IMAGER_PACK_SMOKE_IDENTITY: imager-pack-smoke-import-worker
+    depends_on: *smoke-dependencies
+    mem_limit: 256000000
+    cpus: 1
+    init: true
+    volumes:
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/runner:/tmp
+      - ${IMAGER_SMOKE_DATA_ROOT:?Use an E drive fixture directory}/runner-logs:/app/imager/logs

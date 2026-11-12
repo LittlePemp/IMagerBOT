@@ -185,12 +185,53 @@ ui_label_max_length = 64
 ui_name_max_length = 128
 ui_view_token_bytes = 6
 ui_view_ttl_seconds = 1800.0
+api_base_url = "https://api.telegram.org"
+api_local = false
 history_repair_poll_seconds = 5.0
 history_repair_lease_seconds = 60
 history_repair_retry_initial_seconds = 5.0
 history_repair_retry_max_seconds = 300.0
 notification_retry_after_grace_seconds = 1.0
 notification_retry_jitter_ratio = 0.2
+
+[pack_import]
+jobs_collection = "catalog_import_jobs"
+task_queue = "imager-catalog-import"
+workflow_id_prefix = "imager:import:"
+max_archive_bytes = 256000000
+cloud_max_archive_bytes = 20000000
+max_entries = 10000
+max_expanded_bytes = 512000000
+max_file_bytes = 64000000
+max_compression_ratio = 100.0
+extract_chunk_bytes = 1048576
+max_path_bytes = 1024
+max_path_depth = 16
+max_central_directory_bytes = 16000000
+allowed_compression_methods = [0, 8]
+ignored_files = [".DS_Store", "Thumbs.db"]
+ignored_directories = ["__MACOSX"]
+temp_prefix = "imager-import-"
+archive_filename = "pack.zip"
+extraction_directory = "images"
+archive_key_template = "catalog/imports/{import_id}/{sha256}.zip"
+lease_seconds = 60
+heartbeat_seconds = 30.0
+progress_interval_images = 20
+activity_timeout_seconds = 1800.0
+schedule_timeout_seconds = 86400.0
+retry_initial_seconds = 2.0
+retry_max_seconds = 30.0
+maximum_attempts = 3
+failure_timeout_seconds = 30.0
+dispatch_retry_seconds = 5.0
+max_pending_per_admin = 2
+max_pending_global = 4
+recent_limit = 8
+download_timeout_seconds = 300.0
+disk_headroom_bytes = 3000000000
+bot_api_container_directory = "/var/lib/telegram-bot-api"
+catalog_sync_seconds = 5.0
 
 [generation]
 insertion_format = "crop"
@@ -217,6 +258,9 @@ worker_scratch_directory = "scratch"
 bot_scratch_directory = "bot-scratch"
 client_temp_directory = "client-tmp"
 rpc_journal_directory = ".rpc-results"
+catalog_import_scratch_directory = "import-scratch"
+bot_api_directory = "telegram-api"
+bot_api_temp_directory = "telegram-api-temp"
 
 [auth]
 ui_username = "imager"

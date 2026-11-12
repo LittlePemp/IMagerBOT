@@ -157,6 +157,22 @@ class BotRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.text, 'Админ-панель')
                 self.assertTrue(response.reply_markup.inline_keyboard[0][0].callback_data.startswith('adm:'))
 
+    async def test_import_command_takes_precedence_over_an_admin_value_prompt(self):
+        from src.commands.admin_panel.pack_import.handlers import PackImportStates
+        for previous in (CommonParamsStates.waiting_for_name, CommonParamsStates.waiting_for_value):
+            with self.subTest(previous=previous.state):
+                await self.state(999).set_state(previous)
+                response = await self.send(999, '/import_pack')
+                self.assertIn('ZIP', response.text)
+                self.assertEqual(await self.state(999).get_state(), PackImportStates.waiting_for_archive.state)
+
+    async def test_admin_command_is_not_consumed_as_a_pack_name(self):
+        from src.commands.admin_panel.pack_import.handlers import PackImportStates
+        await self.state(999).set_state(PackImportStates.waiting_for_name)
+        response = await self.send(999, '/admin')
+        self.assertEqual(response.text, 'Админ-панель')
+        self.assertIsNone(await self.state(999).get_state())
+
     async def test_ordinary_user_cannot_use_nested_admin_callback(self):
         admin_menu = await self.send(999, '/admin')
         await self.click(3, title='Пользователи', message=admin_menu)

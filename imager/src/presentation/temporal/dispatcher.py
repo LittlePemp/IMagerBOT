@@ -9,6 +9,7 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository
+from src.infrastructure.catalog_import.bootstrap import create_import_repository
 from src.infrastructure.temporal_client import connect_temporal_client
 from src.shared_kernel.loggers import presentation_logger
 
@@ -97,8 +98,60 @@ async def reconcile_once(repository, client):
             presentation_logger.exception(f'Cannot reconcile workflow: job_id={job_id}')
 
 
+async def dispatch_import_once(repository, client):
+    event = await asyncio.to_thread(repository.claim_dispatch)
+    if event is None:
+        return False
+    import_id, token = event['import_id'], event['dispatch_token']
+    try:
+        try:
+            await asyncio.to_thread(repository.validate_dispatch, event)
+            if not isinstance(event['workflow_id'], str) or not event['workflow_id']:
+                raise ValueError('Import workflow identity is missing')
+        except ValueError as error:
+            await asyncio.to_thread(repository.reject_dispatch, import_id, token, str(error))
+            presentation_logger.error(f'Import inbox rejected: import_id={import_id}')
+            return True
+        request = event['request']
+        try:
+            await client.start_workflow(
+                'ImportCatalogWorkflow', args=[request, event['execution_policy']],
+                id=event['workflow_id'], task_queue=config.pack_import.task_queue,
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+                memo={'import_id': import_id, 'source': request['source'],
+                      'group_name': request['group_name'], 'display_name': request['display_name'],
+                      'actor_id': request['actor_id'], 'execution_policy': event['execution_policy']},
+                static_summary=f'Import: {request["display_name"]}',
+                static_details='Validate the ZIP and publish a new immutable catalog from MinIO in the dedicated import worker.',
+            )
+        except WorkflowAlreadyStartedError:
+            presentation_logger.info(f'Import workflow already accepted: import_id={import_id}')
+        await asyncio.to_thread(repository.mark_dispatched, import_id, token, event['workflow_id'])
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        presentation_logger.exception(f'Cannot dispatch import: import_id={import_id}')
+        await asyncio.to_thread(repository.defer_dispatch, import_id, token, str(error))
+    return True
+
+
+async def reconcile_import_once(repository, client):
+    jobs = await asyncio.to_thread(repository.unfinished_jobs, limit=config.temporal.dispatcher.reconcile_batch_size)
+    for job in jobs:
+        try:
+            description = await client.get_workflow_handle(job['workflow_id']).describe()
+            status = description.status.name if description.status is not None else ''
+            if status in {'FAILED', 'CANCELED', 'TERMINATED', 'TIMED_OUT'}:
+                await asyncio.to_thread(repository.finalize_failure, job['import_id'], status)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            presentation_logger.exception(f'Cannot reconcile import: import_id={job["import_id"]}')
+
+
 async def main():
     repository = create_job_repository()
+    import_repository = create_import_repository()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -113,9 +166,11 @@ async def main():
             while not stop.is_set():
                 if time.monotonic() - last_reconcile >= config.temporal.dispatcher.reconcile_seconds:
                     await reconcile_once(repository, client)
+                    await reconcile_import_once(import_repository, client)
                     last_reconcile = time.monotonic()
                 delivered = await dispatch_once(repository, client)
-                if not delivered:
+                imported = await dispatch_import_once(import_repository, client)
+                if not delivered and not imported:
                     try:
                         await asyncio.wait_for(
                             stop.wait(), timeout=settings.temporal_dispatch_poll_seconds,

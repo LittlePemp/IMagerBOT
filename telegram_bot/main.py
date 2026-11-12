@@ -11,6 +11,7 @@ if _REPOSITORY_ROOT not in sys.path:
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.fsm.storage.pymongo import PyMongoStorage
 from pymongo import AsyncMongoClient
@@ -20,6 +21,7 @@ from imager_config.loader import config
 from settings import settings
 from src.application.admission import AdmissionDispatcher
 from src.application.generation import SubmitGeneration
+from src.application.catalog_projection import CatalogImportProjection
 from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import register_handlers_admin_panel
 from src.commands.admin_panel.user_management import register_handlers_user_management_total
@@ -27,10 +29,12 @@ from src.commands.admin_panel.image_build_params.image_build_params_handler impo
 from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
 from src.commands.main_menu import register_handlers_main_menu, register_fallback
 from src.commands.jobs import register_handlers_jobs
+from src.commands.admin_panel.pack_import import register_handlers_pack_import, register_pack_import_command
 from src.commands.support.support_handler import register_handlers_support
 from src.infrastructure.data.unit_of_work import get_uow
 from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.notifier import GenerationNotifier
+from src.infrastructure.services.catalog_import_service import CatalogImportService
 from src.models.user import User, UserStatus
 from src.utils.loggers import exception_logger
 from src.utils.middlewares import logging_middleware
@@ -52,6 +56,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None):
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
     dp['uow'] = repositories
     dp['user_repository'] = repositories.user_repository
+    dp['catalog_import_service'] = CatalogImportService(gateway, upload_gate=gate)
     dp['generation_service'] = SubmitGeneration(
         repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids,
     )
@@ -65,11 +70,13 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None):
     dp.message.outer_middleware(ConversationExpiryMiddleware())
     register_handlers_main_menu(dp)
     register_handlers_jobs(dp)
+    register_pack_import_command(dp)
     register_handlers_about(dp)
     register_handlers_support(dp)
     register_handlers_admin_panel(dp)
     register_handlers_user_management_total(dp)
     register_handlers_image_build_params(dp, repositories)
+    register_handlers_pack_import(dp, with_command=False)
     register_handlers_image_generation(dp, repositories)
     register_fallback(dp)
     return dp
@@ -91,7 +98,10 @@ async def set_initial_admin(repositories):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=settings.api_token.get_secret_value(), session=AiohttpSession(timeout=config.bot.api_timeout_seconds))
+    bot = Bot(token=settings.api_token.get_secret_value(), session=AiohttpSession(
+        timeout=config.bot.api_timeout_seconds,
+        api=TelegramAPIServer.from_base(settings.telegram_api_base_url, is_local=settings.telegram_api_local),
+    ))
     client = AsyncMongoClient(
         settings.mongodb_uri, tz_aware=True,
         serverSelectionTimeoutMS=config.mongo.server_selection_timeout_ms,
@@ -116,9 +126,13 @@ async def main():
         dispatcher = create_dispatcher(repositories, imager_service, upload_gate=gate, storage=SharedClientStorage(
             client, db_name=settings.database_name, collection_name=config.mongo.bot_fsm_collection,
         ))
+        imports = dispatcher['catalog_import_service']
+        await imports.ensure_indexes()
         notifier = GenerationNotifier(imager_service, bot, repositories.generation_history_repository)
         admission = AdmissionDispatcher(repositories.admission_repository, imager_service, publication_lock=gate.admission_lock)
-        tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop))]
+        projection = CatalogImportProjection(imports, repositories.image_group_repository)
+        tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
+                 asyncio.create_task(projection.run(stop))]
         await bot.delete_webhook(drop_pending_updates=False)
         await dispatcher.start_polling(
             bot, close_bot_session=False, allowed_updates=['message', 'callback_query'],

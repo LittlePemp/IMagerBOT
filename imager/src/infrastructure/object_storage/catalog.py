@@ -181,11 +181,13 @@ def _local_groups(directory, group_name):
     return groups
 
 
-def _local_group_plan(name, group_path, bucket):
+def _local_group_plan(name, group_path, bucket, *, progress=None):
     """Hash/validate a group with one decoded image resident at a time."""
     images, sources, seen_hashes = [], [], set()
     source_files = source_bytes = image_bytes = cache_bytes = 0
     widths, heights = [], []
+    total = sum(1 for path in group_path.iterdir()
+                if path.is_file() and path.suffix.lower() in config.catalog.allowed_extensions) if progress else 0
     for path in sorted(group_path.iterdir(), key=lambda item: item.name):
         if not path.is_file() or path.suffix.lower() not in config.catalog.allowed_extensions:
             continue
@@ -196,6 +198,8 @@ def _local_group_plan(name, group_path, bucket):
             raise ValueError(f'{path.name}: encoded image size must fit {config.limits.source_file_bytes} bytes')
         digest = file_sha256(path)
         if digest in seen_hashes:
+            if progress:
+                progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
             continue
         if len(images) >= config.catalog.max_images:
             raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
@@ -226,6 +230,8 @@ def _local_group_plan(name, group_path, bucket):
         cache_bytes += normalized.value.nbytes
         seen_hashes.add(digest)
         del decoded, normalized, validation
+        if progress:
+            progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
     if not images:
         raise ValueError(f'Catalog group {name} contains no supported images')
     manifest = dict(schema_version=SCHEMA_VERSION, group_name=name,

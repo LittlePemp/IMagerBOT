@@ -33,6 +33,8 @@ def main():
     configuration = types.ModuleType('settings')
     configuration.settings = SimpleNamespace(
         telegram_admin_ids=(999,),
+        telegram_api_local=False,
+        telegram_api_base_url=config.bot.api_base_url,
         tzinfo=timezone.utc,
         mongodb_uri='mongodb://127.0.0.1:1',
         imager_database_name='offline',

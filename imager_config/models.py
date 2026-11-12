@@ -228,6 +228,49 @@ class RuntimeBotConfig:
     history_repair_retry_max_seconds: float
     notification_retry_after_grace_seconds: float
     notification_retry_jitter_ratio: float
+    api_base_url: str
+    api_local: bool
+
+
+@dataclass(frozen=True)
+class RuntimePackImportConfig:
+    jobs_collection: str
+    task_queue: str
+    workflow_id_prefix: str
+    max_archive_bytes: int
+    cloud_max_archive_bytes: int
+    max_entries: int
+    max_expanded_bytes: int
+    max_file_bytes: int
+    max_compression_ratio: float
+    extract_chunk_bytes: int
+    max_path_bytes: int
+    max_path_depth: int
+    max_central_directory_bytes: int
+    allowed_compression_methods: tuple[int, ...]
+    ignored_files: tuple[str, ...]
+    ignored_directories: tuple[str, ...]
+    temp_prefix: str
+    archive_filename: str
+    extraction_directory: str
+    archive_key_template: str
+    lease_seconds: int
+    heartbeat_seconds: float
+    progress_interval_images: int
+    activity_timeout_seconds: float
+    schedule_timeout_seconds: float
+    retry_initial_seconds: float
+    retry_max_seconds: float
+    maximum_attempts: int
+    failure_timeout_seconds: float
+    dispatch_retry_seconds: float
+    max_pending_per_admin: int
+    max_pending_global: int
+    recent_limit: int
+    download_timeout_seconds: float
+    disk_headroom_bytes: int
+    bot_api_container_directory: str
+    catalog_sync_seconds: float
 
 
 @dataclass(frozen=True)
@@ -258,6 +301,9 @@ class RuntimePathsConfig:
     bot_scratch_directory: str
     client_temp_directory: str
     rpc_journal_directory: str
+    catalog_import_scratch_directory: str
+    bot_api_directory: str
+    bot_api_temp_directory: str
 
 
 @dataclass(frozen=True)
@@ -338,6 +384,7 @@ class RuntimeConfig:
     jobs: RuntimeJobsConfig
     temporal: RuntimeTemporalConfig
     bot: RuntimeBotConfig
+    pack_import: RuntimePackImportConfig
     generation: RuntimeGenerationConfig
     paths: RuntimePathsConfig
     auth: RuntimeAuthConfig

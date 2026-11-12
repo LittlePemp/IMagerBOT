@@ -1,6 +1,7 @@
 import os
 from zoneinfo import ZoneInfo
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
@@ -10,6 +11,8 @@ from imager_config.loader import config
 
 class Settings(BaseSettings):
     api_token: SecretStr
+    telegram_api_base_url: str = config.bot.api_base_url
+    telegram_api_local: bool = config.bot.api_local
     mongodb_uri: str
     rabbitmq_url: str = config.legacy.rabbitmq_url
     rabbitmq_requests_queue: str = config.legacy.rabbitmq_requests_queue
@@ -52,6 +55,15 @@ class Settings(BaseSettings):
         if not result or any(item <= 0 for item in result):
             raise ValueError('Configure at least one positive permanent administrator ID')
         return result
+
+    @field_validator('telegram_api_base_url')
+    @classmethod
+    def validate_api_endpoint(cls, value):
+        parsed = urlsplit(value)
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            raise ValueError('Telegram API endpoint must be an HTTP(S) base URL without credentials')
+        return value.rstrip('/')
 
     @model_validator(mode='after')
     def validate_notification_lease(self):

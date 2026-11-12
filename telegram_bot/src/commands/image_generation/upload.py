@@ -7,6 +7,7 @@ from imager_config.loader import config
 from imager_contracts.protocol import TELEGRAM_JOB_ID_NAMESPACE
 from src.commands.common_keyboards import home_keyboard
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
+from src.infrastructure.services.telegram_files import validate_download_path
 from src.utils.middlewares.abuse_control import UploadBusy
 from src.utils.navigation import render_view
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -40,6 +41,7 @@ class TelegramPhotoSource:
     async def __call__(self, job_id):
         photo = self.message.photo[-1]
         remote = await self.message.bot.get_file(photo.file_id)
+        validate_download_path(self.message.bot, remote)
         if remote.file_size is not None and remote.file_size > config.limits.source_file_bytes:
             raise ValueError('Размер исходного файла превышает допустимый предел.')
         with tempfile.TemporaryDirectory(prefix=config.storage.upload_temp_prefix) as directory:

@@ -282,6 +282,72 @@ services:
       - src.presentation.temporal.worker
     mem_limit: 1000000000
     secrets: *client-tls-secrets
+  catalog-import-worker:
+    image: imager-temporal/core:local
+    build: *core-build
+    environment:
+      <<: *core-environment
+      TMPDIR: /tmp
+    volumes:
+      - *config-volume
+      - type: bind
+        source: ${IMAGER_IMPORT_SCRATCH_PATH:?Run infra/setup.py}
+        target: /tmp
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    stop_grace_period: 60s
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - src.presentation.temporal.import_worker
+    mem_limit: 1000000000
+    secrets: *client-tls-secrets
+  telegram-bot-api:
+    profiles:
+      - bot
+    image: aiogram/telegram-bot-api@sha256:ba7493f853b3c3339e6dc2a444d5bcfbe121188b491aabd30857dcd69978430c
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    mem_limit: 256000000
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_WORK_DIR: /var/lib/telegram-bot-api
+      TELEGRAM_TEMP_DIR: /tmp/telegram-bot-api
+      TELEGRAM_LOCAL: '1'
+      TELEGRAM_HTTP_PORT: '8081'
+    entrypoint:
+      - /bin/sh
+      - /scripts/start.sh
+    volumes:
+      - ./telegram-bot-api/start.sh:/scripts/start.sh:ro
+      - type: bind
+        source: ${IMAGER_BOT_API_DATA_PATH:?Run infra/setup.py}
+        target: /var/lib/telegram-bot-api
+      - type: bind
+        source: ${IMAGER_BOT_API_TEMP_PATH:?Run infra/setup.py}
+        target: /tmp/telegram-bot-api
+    healthcheck:
+      test:
+        - CMD
+        - nc
+        - -z
+        - -w
+        - '2'
+        - 127.0.0.1
+        - '8081'
+      interval: 5s
+      timeout: 3s
+      retries: 30
   telegram-bot:
     profiles:
       - bot
@@ -295,6 +361,8 @@ services:
     environment:
       API_TOKEN: ${API_TOKEN:-}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
+      TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
+      TELEGRAM_API_LOCAL: 'true'
       MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
       IMAGER_CONFIG_FILE: /app/config/runtime.toml
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
@@ -305,7 +373,13 @@ services:
       - type: bind
         source: ${IMAGER_BOT_SCRATCH_PATH:?Run infra/setup.py}
         target: /tmp
+      - type: bind
+        source: ${IMAGER_BOT_API_DATA_PATH:?Run infra/setup.py}
+        target: /var/lib/telegram-bot-api
+        read_only: true
     depends_on:
+      telegram-bot-api:
+        condition: service_healthy
       mongodb:
         condition: service_healthy
       minio:

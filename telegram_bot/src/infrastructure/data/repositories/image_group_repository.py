@@ -39,7 +39,8 @@ class ImageGroupRepository:
             await self.collection.update_one(
                 {'imager_name': group.group},
                 {'$set': {'count': group.count, 'available_in_core': group.count > 0, 'last_synced': now},
-                 '$setOnInsert': {'display_name': group.group, 'status': GroupStatus.ACTIVE, 'revision': 0}},
+                 '$setOnInsert': {'display_name': getattr(group, 'display_name', None) or group.group,
+                                  'status': GroupStatus.ACTIVE, 'revision': 0}},
                 upsert=True,
             )
         await self.collection.update_many(
