@@ -31,4 +31,4 @@ class AdmissionConflict(ValueError):
 class AdmissionUncertain(RuntimeError):
     def __init__(self, job_id):
         self.job_id = job_id
-        super().__init__(f'Не удалось уточнить приём задания {job_id}.')
+        super().__init__('Пока не удалось подтвердить получение фотографии.')

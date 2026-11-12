@@ -6,6 +6,7 @@ import io
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -115,9 +116,17 @@ class S3:
         content, metadata = self.objects[key]
         return SimpleNamespace(size=len(content), metadata={'x-amz-meta-sha256': metadata['sha256']})
 
-    def fput_object(self, bucket, key, path, **kwargs):
+    def put_object(self, bucket, key, data, length, **kwargs):
+        content = bytearray()
+        for chunk in iter(lambda: data.read(config.storage.transfer_chunk_bytes), b''):
+            content.extend(chunk)
+        if len(content) != length:
+            raise ValueError('Unexpected upload size')
         self.uploads += 1
-        self.objects[key] = Path(path).read_bytes(), kwargs['metadata']
+        self.objects[key] = bytes(content), kwargs['metadata']
+
+    def fput_object(self, *args, **kwargs):
+        raise AssertionError('Archive upload must use its already opened stream')
 
 
 def request(import_id='import-1', actor=999, name='Иконки'):
@@ -207,12 +216,13 @@ class ZipTelegramSession(FakeTelegramSession):
     def __init__(self):
         super().__init__()
         self.archive = zip_bytes()
+        self.remote_path = 'source.zip'
         self.downloads = 0
 
     async def make_request(self, bot, method, timeout=None):
         if isinstance(method, GetFile):
             self.methods.append(method)
-            return File(file_id='zip-file', file_unique_id='zip-unique', file_size=len(self.archive), file_path='source.zip')
+            return File(file_id='zip-file', file_unique_id='zip-unique', file_size=len(self.archive), file_path=self.remote_path)
         return await super().make_request(bot, method, timeout)
 
     async def stream_content(self, url, **kwargs):
@@ -276,6 +286,8 @@ class PackImportConversationTests(unittest.IsolatedAsyncioTestCase):
         job = next(iter(self.jobs.documents.values()))
         self.assertEqual(job['request']['display_name'], 'Новые иконки')
         self.assertIn('в очереди', self.session.last[999].text)
+        self.assertNotIn(job['_id'], self.session.last[999].text)
+        self.assertNotIn('задани', self.session.last[999].text.lower())
         job.update(status='completed', result={'count': 5})
         with patch.object(handlers, 'render_view', AsyncMock()):
             await handlers.render_status(self.session.last[999], self.state(), self.service,
@@ -322,7 +334,7 @@ class PackImportConversationTests(unittest.IsolatedAsyncioTestCase):
         message = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock()))
         with patch.object(handlers.shutil, 'disk_usage', return_value=SimpleNamespace(free=0)):
             with self.assertRaises(ValueError):
-                await handlers._download(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
+                await handlers._upload_archive_from_telegram(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
         message.bot.get_file.assert_not_awaited()
 
     async def test_local_get_file_path_cannot_escape_shared_cache(self):
@@ -333,7 +345,7 @@ class PackImportConversationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(handlers, 'settings', SimpleNamespace(telegram_api_local=True)):
             with patch.object(handlers.shutil, 'disk_usage', return_value=SimpleNamespace(free=10**12)):
                 with self.assertRaises(ValueError):
-                    await handlers._download(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
+                    await handlers._upload_archive_from_telegram(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
         message.bot.download_file.assert_not_awaited()
 
     async def test_missing_get_file_path_produces_expected_error_without_download(self):
@@ -344,5 +356,51 @@ class PackImportConversationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(handlers, 'settings', SimpleNamespace(telegram_api_local=True)):
             with patch.object(handlers.shutil, 'disk_usage', return_value=SimpleNamespace(free=10**12)):
                 with self.assertRaisesRegex(ValueError, 'ещё не подготовил архив'):
-                    await handlers._download(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
+                    await handlers._upload_archive_from_telegram(message, {'file_size': 1, 'file_id': 'zip', 'import_id': 'id'}, self.service)
         message.bot.download_file.assert_not_awaited()
+
+    async def test_local_archive_uploads_from_shared_cache_without_temp_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory).resolve()
+            archive = cache / 'telegram-document.zip'
+            archive.write_bytes(self.session.archive)
+            self.session.remote_path = str(archive)
+            configured = replace(config, pack_import=replace(
+                config.pack_import, bot_api_container_directory=str(cache),
+            ))
+            with (patch.object(handlers, 'config', configured),
+                  patch.object(handlers, 'settings', SimpleNamespace(telegram_api_local=True)),
+                  patch.object(gateway_module, 'settings', SimpleNamespace(telegram_api_local=True)),
+                  patch.object(handlers.shutil, 'disk_usage', return_value=SimpleNamespace(free=10**12)) as disk_usage,
+                  patch.object(handlers.tempfile, 'TemporaryDirectory', side_effect=AssertionError('No local copy')),
+                  patch.object(handlers.tempfile, 'gettempdir', side_effect=AssertionError('No bot scratch access')),
+                  patch.object(self.bot, 'download_file', AsyncMock()) as download):
+                await self.send('/import_pack')
+                await self.send(filename='icons.zip')
+                await self.send('Пак из общего каталога')
+            download.assert_not_awaited()
+            self.assertTrue(all(call.args == (cache,) for call in disk_usage.call_args_list))
+            self.assertEqual(archive.read_bytes(), self.session.archive)
+        self.assertEqual(len(self.jobs.documents), 1)
+        self.assertEqual(self.store.uploads, 1)
+        self.assertEqual(self.session.downloads, 0)
+        self.assertEqual(next(iter(self.store.objects.values()))[0], self.session.archive)
+
+    async def test_local_cache_size_mismatch_does_not_upload_or_submit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory).resolve()
+            archive = cache / 'telegram-document.zip'
+            archive.write_bytes(self.session.archive + b'changed-after-get-file')
+            self.session.remote_path = str(archive)
+            configured = replace(config, pack_import=replace(
+                config.pack_import, bot_api_container_directory=str(cache),
+            ))
+            with (patch.object(handlers, 'config', configured),
+                  patch.object(handlers, 'settings', SimpleNamespace(telegram_api_local=True)),
+                  patch.object(handlers.shutil, 'disk_usage', return_value=SimpleNamespace(free=10**12))):
+                await self.send('/import_pack')
+                await self.send(filename='icons.zip')
+                await self.send('Изменившийся архив')
+        self.assertEqual(self.store.uploads, 0)
+        self.assertEqual(len(self.jobs.documents), 0)
+        self.assertEqual(self.session.downloads, 0)

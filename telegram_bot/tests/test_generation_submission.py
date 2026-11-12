@@ -152,3 +152,78 @@ class TestBoundedTelegramSource(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await upload.TelegramPhotoSource(message, gateway)('job-1')
         gateway.upload_source.assert_not_awaited()
+
+
+class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from aiogram import Bot
+        from aiogram.types import Chat, Message, User
+        from datetime import datetime, timezone
+        from test_bot_routes import FakeTelegramSession
+        self.session = FakeTelegramSession()
+        self.bot = Bot(token='123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi', session=self.session)
+        self.message = Message(
+            message_id=34, date=datetime.now(timezone.utc), chat=Chat(id=1, type='private'),
+            from_user=User(id=1, first_name='Alice', username='Alice', is_bot=False),
+        ).as_(self.bot)
+        self.state = SimpleNamespace(
+            get_data=AsyncMock(return_value={'generation_mode': 'manual'}),
+            clear=AsyncMock(), update_data=AsyncMock(),
+        )
+        self.user = SimpleNamespace(telegram_id=1, telegram_username='Alice')
+
+    async def asyncTearDown(self):
+        await self.bot.session.close()
+        self.assertEqual(self.session.unsupported, [])
+
+    def assert_public(self, text, private_id):
+        self.assertNotIn(private_id, text)
+        self.assertNotIn(private_id.replace('-', ''), text)
+        self.assertNotIn('задан', text.casefold())
+
+    async def test_accepted_and_duplicate_messages_keep_identity_only_in_server_actions(self):
+        from src.commands.image_generation import upload
+        private_id = upload.generation_job_id(self.message)
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                receipt = SimpleNamespace(job_id=private_id, duplicate=duplicate)
+                service = SimpleNamespace(execute=AsyncMock(return_value=receipt), gateway=object())
+                await upload.receive_image(self.message, self.state, self.user, service)
+                rendered = self.session.last[1]
+                self.assert_public(rendered.text, private_id)
+                buttons = [button for row in rendered.reply_markup.inline_keyboard for button in row]
+                self.assertIn('Статус изображения', [button.text for button in buttons])
+                for button in buttons:
+                    self.assert_public(button.text, private_id)
+                    self.assertNotIn(private_id, button.callback_data)
+                records = self.state.update_data.await_args.kwargs['_current_view']['records']
+                self.assertIn(f'job_status:{private_id}', records.values())
+                context = service.execute.await_args.kwargs['client_context']
+                self.assertTrue(context['display_name'].startswith('Alice_'))
+                self.assert_public(context['display_name'], private_id)
+                self.assertTrue(context['display_name'].endswith('.' + config.render.output_extension))
+
+    async def test_uncertain_acceptance_is_not_claimed_as_success_and_keeps_exact_status_action(self):
+        from src.commands.image_generation import upload
+        from src.infrastructure.data.errors import AdmissionUncertain
+        private_id = upload.generation_job_id(self.message)
+        service = SimpleNamespace(execute=AsyncMock(side_effect=AdmissionUncertain(private_id)), gateway=object())
+        await upload.receive_image(self.message, self.state, self.user, service)
+        rendered = self.session.last[1]
+        self.assert_public(rendered.text, private_id)
+        self.assertIn('не удалось подтвердить', rendered.text)
+        self.assertNotIn('Изображение принято', rendered.text)
+        buttons = [button for row in rendered.reply_markup.inline_keyboard for button in row]
+        self.assertIn('Проверить статус', [button.text for button in buttons])
+        for button in buttons:
+            self.assertNotIn(private_id, button.callback_data)
+        records = self.state.update_data.await_args.kwargs['_current_view']['records']
+        self.assertIn(f'job_status:{private_id}', records.values())
+        self.state.clear.assert_not_awaited()
+
+    async def test_raw_identity_in_validation_error_is_not_sent_to_the_user(self):
+        from src.commands.image_generation import upload
+        private_id = upload.generation_job_id(self.message)
+        service = SimpleNamespace(execute=AsyncMock(side_effect=ValueError(f'Задание {private_id} недоступно')), gateway=object())
+        await upload.receive_image(self.message, self.state, self.user, service)
+        self.assert_public(self.session.last[1].text, private_id)

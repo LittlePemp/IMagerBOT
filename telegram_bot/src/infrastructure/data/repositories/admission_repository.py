@@ -34,6 +34,7 @@ class AdmissionRepository:
             partialFilterExpression={'admissions.job_id': {'$exists': True}},
         )
         await self.collection.create_index([('admissions.state', 1), ('admissions.next_attempt_at', 1)])
+        await self.collection.create_index([('actor_id', 1), ('date', -1)])
 
     @staticmethod
     def _now(now):
@@ -65,6 +66,16 @@ class AdmissionRepository:
     async def find(self, job_id):
         found = await self._find_entry(job_id)
         return self._receipt(*found, duplicate=True) if found else None
+
+    async def latest(self, actor_id):
+        bucket = await self.collection.find_one(
+            {'actor_id': actor_id, 'admissions.0': {'$exists': True}},
+            {'actor_id': 1, 'date': 1, 'admissions': {'$slice': -1}},
+            sort=[('date', -1)],
+        )
+        if not bucket or bucket.get('actor_id') != actor_id or not bucket.get('admissions'):
+            return None
+        return self._receipt(bucket, bucket['admissions'][-1], duplicate=True)
 
     async def remaining(self, actor_id, now=None):
         bucket_id, _, _ = self._day(actor_id, self._now(now))
@@ -100,13 +111,13 @@ class AdmissionRepository:
     def _validate_document(document, actor_id):
         request = JobRequest.from_dict(document['request'])
         if request.job_id != document['_id'] or payload_fingerprint(request) != document['payload_hash']:
-            raise AdmissionConflict('Идентификатор или параметры задания не совпадают.')
+            raise AdmissionConflict('Параметры изображения изменились. Выберите их заново.')
         if request.client_id != 'telegram' or request.client_context.get('user_id') != actor_id:
-            raise AdmissionConflict('Задание принадлежит другому пользователю.')
+            raise AdmissionConflict('Изображение недоступно для этого аккаунта.')
         if document.get('status') != 'queued' or document.get('dispatch', {}).get('state') != 'pending':
-            raise AdmissionConflict('Принимается только новое подготовленное задание.')
+            raise AdmissionConflict('Это изображение уже принято. Проверьте его статус.')
         if not document.get('execution_policy'):
-            raise AdmissionConflict('Не закреплена политика исполнения задания.')
+            raise AdmissionConflict('Не удалось подготовить обработку изображения. Попробуйте ещё раз.')
 
     @staticmethod
     def _matching_receipt(found, document):

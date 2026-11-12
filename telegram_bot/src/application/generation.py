@@ -69,13 +69,13 @@ class SubmitGeneration:
         receipt = await self.admissions.find(job_id)
         if receipt is not None:
             if receipt.actor_id != actor_id:
-                raise AccessDenied('Задание принадлежит другому пользователю.')
+                raise AccessDenied('Это изображение недоступно.')
             return receipt
         legacy = await self.gateway.get_job(job_id)
         if legacy is not None:
             if (legacy['request']['client_id'] != 'telegram'
                     or legacy['request']['client_context']['user_id'] != actor_id):
-                raise AccessDenied('Задание принадлежит другому пользователю.')
+                raise AccessDenied('Это изображение недоступно.')
             return AdmissionReceipt(
                 job_id=job_id, state='sent', date=legacy['created_at'].date().isoformat(),
                 payload_hash=legacy['payload_hash'], duplicate=True,
@@ -104,7 +104,7 @@ class SubmitGeneration:
                 receipt = await self.admissions.find(job_id)
                 if receipt is not None:
                     if receipt.actor_id != actor_id:
-                        raise AccessDenied('Задание принадлежит другому пользователю.')
+                        raise AccessDenied('Это изображение недоступно.')
                     return receipt
                 await self._policy(actor_id, draft)
                 await self._capacity()

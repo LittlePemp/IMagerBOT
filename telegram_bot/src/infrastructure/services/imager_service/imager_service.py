@@ -78,6 +78,13 @@ class ImagerService:
     async def get_job(self, job_id):
         return await asyncio.to_thread(self.jobs.find_one, {'_id': job_id})
 
+    async def latest_user_job(self, actor_id):
+        return await asyncio.to_thread(
+            self.jobs.find_one,
+            {'request.client_id': 'telegram', 'request.client_context.user_id': actor_id},
+            sort=[('created_at', -1)],
+        )
+
     async def count_active_jobs(self):
         return await asyncio.to_thread(
             self.jobs.count_documents, {'status': {'$nin': ['completed', 'failed']}},
@@ -138,7 +145,7 @@ class ImagerService:
                 pass
             stored = await self.get_job(job_id)
             if stored is None or stored.get('payload_hash') != document['payload_hash']:
-                raise ValueError('Идентификатор задания уже использован с другими параметрами.')
+                raise ValueError('Это изображение уже принято с другими параметрами.')
             service_logger.info(f'Generation command accepted: job_id={job_id}')
             return GenerationAccepted(
                 job_id=job_id, status=stored['status'],
@@ -340,7 +347,7 @@ class ImagerService:
         from imager_contracts.protocol import JOB_ID_PATTERN
 
         if not isinstance(job_id, str) or not re.fullmatch(JOB_ID_PATTERN, job_id):
-            raise ValueError('Некорректный номер задания.')
+            raise ValueError('Не удалось найти изображение. Откройте «Моё изображение» в меню.')
         result = await asyncio.to_thread(
             self.jobs.update_one,
             {'_id': job_id, 'request.client_id': 'telegram',

@@ -47,7 +47,9 @@ class TestJobRecovery(TelegramFixture):
         self.gateway.get_job = AsyncMock(side_effect=lambda job_id: copy.deepcopy(self.store.document))
         self.receipt = AdmissionReceipt('job-1', 'sent', '2026-11-12', 'hash', actor_id=5)
         self.admissions = SimpleNamespace(find=AsyncMock(return_value=self.receipt),
+                                          latest=AsyncMock(return_value=self.receipt),
                                           accept_submission=AsyncMock())
+        self.gateway.latest_user_job = AsyncMock(return_value=None)
         self.generation = SimpleNamespace(gateway=self.gateway, admissions=self.admissions)
         self.user = SimpleNamespace(telegram_id=5)
 
@@ -93,8 +95,10 @@ class TestJobRecovery(TelegramFixture):
         self.setup_job()
         await jobs.show_status(self.message(), self.state, self.user, self.generation, 'job-1')
         response = self.session.requests[-1]
-        self.assertIn('Сборка: готово', response.text)
-        self.assertIn('Доставка: не доставлено', response.text)
+        self.assertIn('Изображение готово', response.text)
+        self.assertIn('отправить его пока не удалось', response.text)
+        self.assertNotIn('job-1', response.text)
+        self.assertNotIn('Задание', response.text)
         self.assertNotIn('private technical details', response.text)
         actions = (await self.state.get_data())[CURRENT_VIEW]['records'].values()
         self.assertIn('job_retry:job-1', actions)
@@ -113,14 +117,112 @@ class TestJobRecovery(TelegramFixture):
         )
         self.gateway.get_job.side_effect = ConnectionFailure('core down')
         await jobs.show_status(self.message(), self.state, self.user, self.generation, 'job-1')
-        self.assertIn('ожидает передачи ядру', self.session.requests[-1].text)
+        self.assertIn('Фото принято. Уточняю статус обработки', self.session.requests[-1].text)
+        self.assertNotIn('job-1', self.session.requests[-1].text)
+        self.assertNotIn('ядр', self.session.requests[-1].text)
         self.assertNotIn('core down', self.session.requests[-1].text)
 
     async def test_retry_command_uses_existing_result_and_cannot_schedule_twice(self):
         self.setup_job()
         await jobs.retry_delivery(self.message(), self.state, self.user, self.generation, 'job-1')
-        self.assertIn('Повторная доставка запланирована', self.session.requests[-1].text)
+        self.assertIn('Отправлю готовое изображение ещё раз', self.session.requests[-1].text)
         self.assertEqual(self.store.document['completion_outbox']['state'], 'pending')
         await jobs.retry_delivery(self.message(), self.state, self.user, self.generation, 'job-1')
-        self.assertIn('Повтор сейчас недоступен', self.session.requests[-1].text)
+        self.assertIn('Повторная отправка сейчас недоступна', self.session.requests[-1].text)
         self.admissions.accept_submission.assert_not_awaited()
+
+    async def test_status_without_identifier_uses_latest_own_admission(self):
+        self.setup_job()
+        await jobs.status_command(self.message(), self.state, self.user, self.generation,
+                                  CommandObject(prefix='/', command='status'))
+        self.admissions.latest.assert_awaited_once_with(5)
+        self.gateway.latest_user_job.assert_not_awaited()
+        response = self.session.requests[-1]
+        self.assertIn('Изображение готово', response.text)
+        self.assertNotIn('job-1', response.text)
+        self.assertNotIn('задани', response.text.lower())
+
+    async def test_status_without_identifier_recovers_legacy_picture(self):
+        self.setup_job()
+        self.admissions.latest.return_value = self.admissions.find.return_value = None
+        self.gateway.latest_user_job.return_value = self.store.document
+        await jobs.status_command(self.message(), self.state, self.user, self.generation,
+                                  CommandObject(prefix='/', command='status'))
+        self.gateway.latest_user_job.assert_awaited_once_with(5)
+        self.assertIn('Изображение готово', self.session.requests[-1].text)
+        self.assertNotIn('job-1', self.session.requests[-1].text)
+
+    async def test_latest_status_rejects_foreign_owner_without_fallback(self):
+        self.setup_job()
+        self.user.telegram_id = 6
+        await jobs.show_latest(self.message(), self.state, self.user, self.generation)
+        self.gateway.latest_user_job.assert_not_awaited()
+        self.gateway.get_job.assert_not_awaited()
+        self.assertEqual(self.session.requests[-1].text, jobs.NO_IMAGE_TEXT)
+
+    async def test_empty_history_is_explained_without_requesting_a_number(self):
+        self.setup_job()
+        self.admissions.latest.return_value = None
+        await jobs.show_latest(self.message(), self.state, self.user, self.generation)
+        self.assertEqual(self.session.requests[-1].text, jobs.NO_IMAGE_TEXT)
+        self.assertNotIn('номер', self.session.requests[-1].text.lower())
+        self.gateway.get_job.assert_not_awaited()
+
+    async def test_latest_pending_image_survives_core_status_outage(self):
+        self.setup_job()
+        self.gateway.get_job.side_effect = ConnectionFailure('private server detail')
+        await jobs.show_latest(self.message(), self.state, self.user, self.generation)
+        self.assertEqual(self.session.requests[-1].text, jobs.PENDING_IMAGE_TEXT)
+        self.gateway.latest_user_job.assert_not_awaited()
+        self.assertNotIn('private server detail', self.session.requests[-1].text)
+
+    async def test_retry_without_identifier_uses_existing_image(self):
+        self.setup_job()
+        await jobs.retry_command(self.message(), self.state, self.user, self.generation,
+                                 CommandObject(prefix='/', command='retry_delivery'))
+        self.assertEqual(self.store.document['completion_outbox']['state'], 'pending')
+        self.assertIn('Отправлю готовое изображение ещё раз', self.session.requests[-1].text)
+        self.assertNotIn('job-1', self.session.requests[-1].text)
+        self.admissions.accept_submission.assert_not_awaited()
+
+    async def test_all_progress_states_hide_execution_details(self):
+        self.setup_job()
+        for status in ('queued', 'running', 'retrying', 'failed', 'completed'):
+            for delivery in ('pending', 'claimed', 'sent', 'failed'):
+                with self.subTest(status=status, delivery=delivery):
+                    self.store.document.update(status=status)
+                    self.store.document['completion_outbox']['state'] = delivery
+                    await jobs.show_status(self.message(), self.state, self.user, self.generation, 'job-1')
+                    response = self.session.requests[-1]
+                    visible = response.text + ' '.join(button.text for row in response.reply_markup.inline_keyboard for button in row)
+                    for hidden in ('job-1', 'задани', 'ядр', 'workflow', 'номер'):
+                        self.assertNotIn(hidden, visible.lower())
+                    self.assertTrue(all(button.callback_data.startswith('n:')
+                                        for row in response.reply_markup.inline_keyboard for button in row))
+
+    async def test_failed_admission_does_not_promise_a_future_result(self):
+        self.setup_job()
+        self.admissions.find.return_value = AdmissionReceipt('job-1', 'failed', '2026-11-12', 'hash', actor_id=5)
+        self.gateway.get_job.return_value = None
+        self.gateway.get_job.side_effect = None
+        for handler in (jobs.show_status, jobs.retry_delivery):
+            with self.subTest(handler=handler.__name__):
+                await handler(self.message(), self.state, self.user, self.generation, 'job-1')
+                text = self.session.requests[-1].text
+                self.assertEqual(text, jobs.FAILED_ADMISSION_TEXT)
+                self.assertNotIn('Результат придёт', text)
+                self.assertNotIn('job-1', text)
+        self.assertEqual(self.store.calls, 0)
+
+    async def test_completed_without_result_does_not_offer_an_impossible_retry(self):
+        self.setup_job()
+        self.store.document['result'] = None
+        for delivery in ('pending', 'claimed', 'sent', 'failed'):
+            with self.subTest(delivery=delivery):
+                self.store.document['completion_outbox']['state'] = delivery
+                await jobs.show_status(self.message(), self.state, self.user, self.generation, 'job-1')
+                response = self.session.requests[-1]
+                self.assertEqual(response.text, jobs.MISSING_RESULT_TEXT)
+                actions = (await self.state.get_data())[CURRENT_VIEW]['records'].values()
+                self.assertFalse(any(action.startswith('job_retry:') for action in actions))
+                self.assertNotIn('Нажмите', response.text)

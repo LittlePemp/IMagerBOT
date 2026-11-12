@@ -14,6 +14,7 @@ from aiogram.types import FSInputFile
 from imager_config.loader import config
 from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 from src.utils.loggers import exception_logger, service_logger
+from src.utils.result_files import delivery_result_filename
 
 
 class GenerationNotifier:
@@ -65,13 +66,15 @@ class GenerationNotifier:
                     )
                     if lost.is_set():
                         raise RuntimeError('Delivery lease was lost before sending the document')
-                    filename = context.get('display_name') or job_id
+                    filename = delivery_result_filename(
+                        context.get('display_name'), created_at=job.get('created_at'), job_id=job_id,
+                    )
                     message = await self.bot.send_document(
                         chat_id=chat_id,
                         document=FSInputFile(
-                            path, filename=f'{filename}{Path(config.storage.result_filename).suffix}'
+                            path, filename=filename,
                         ),
-                        caption=f'Ваше изображение готово.\nЗадание: {job_id}',
+                        caption='Ваше изображение готово.',
                     )
             else:
                 if lost.is_set():
@@ -79,8 +82,8 @@ class GenerationNotifier:
                 message = await self.bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f'Не удалось собрать изображение.\nЗадание: {job_id}\n'
-                        'Попробуйте другие параметры или обратитесь в поддержку с номером задания.'
+                        'Не удалось собрать изображение. '
+                        'Попробуйте другие параметры или обратитесь в поддержку.'
                     ),
                 )
             acknowledged = await self.service.acknowledge_completion(

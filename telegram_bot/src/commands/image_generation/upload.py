@@ -10,6 +10,7 @@ from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, Dai
 from src.infrastructure.services.telegram_files import validate_download_path
 from src.utils.middlewares.abuse_control import UploadBusy
 from src.utils.navigation import render_view
+from src.utils.result_files import contains_generation_reference, new_result_filename
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -56,32 +57,44 @@ class TelegramPhotoSource:
 
 async def receive_image(message, state, user, generation_service):
     draft = await state.get_data()
+    job_id = generation_job_id(message)
     try:
         receipt = await generation_service.execute(
-            actor_id=user.telegram_id, draft=draft, job_id=generation_job_id(message),
+            actor_id=user.telegram_id, draft=draft, job_id=job_id,
             client_context={
                 'chat_id': message.chat.id, 'reply_to_message_id': message.message_id,
                 'generation_mode': draft.get('generation_mode', 'presets'),
-                'display_name': f'{config.render.output_stem}_{generation_job_id(message)}',
+                'display_name': new_result_filename(getattr(user, 'telegram_username', None)),
             }, source_loader=TelegramPhotoSource(message, generation_service.gateway),
         )
     except DailyQuotaExceeded as error:
         await message.answer(f'На сегодня доступно {error.limit} изображений. Лимит обновится в полночь ({config.bot.timezone}).')
         return
     except AdmissionUncertain as error:
-        await message.answer(f'Приём задания {error.job_id} уточняется. Повторная доставка этого сообщения не спишет лимит ещё раз.')
+        keyboard = InlineKeyboardBuilder()
+        keyboard.button(text='Проверить статус', callback_data=f'job_status:{error.job_id}')
+        keyboard.button(text='Главное меню', callback_data='main_menu')
+        keyboard.adjust(1)
+        await render_view(
+            message, state,
+            'Пока не удалось подтвердить приём изображения. Проверьте статус немного позже.',
+            keyboard.as_markup(),
+        )
         return
     except (AccessDenied, UploadBusy, ValueError) as error:
-        await render_view(message, state, str(error), home_keyboard())
+        text = str(error)
+        if contains_generation_reference(text, job_id=job_id) or 'задан' in text.casefold():
+            text = 'Не удалось принять изображение. Проверьте параметры и попробуйте снова.'
+        await render_view(message, state, text, home_keyboard())
         return
     await state.clear()
     keyboard = InlineKeyboardBuilder()
-    keyboard.button(text='Статус задания', callback_data=f'job_status:{receipt.job_id}')
+    keyboard.button(text='Статус изображения', callback_data=f'job_status:{receipt.job_id}')
     keyboard.button(text='Главное меню', callback_data='main_menu')
     keyboard.adjust(1)
     await render_view(
         message, state,
-        f'Изображение {"уже " if receipt.duplicate else ""}принято. Задание: {receipt.job_id}.\n'
-        'Результат придёт отдельным сообщением. Повтор этого задания не расходует лимит.',
+        f'Изображение {"уже " if receipt.duplicate else ""}принято. '
+        'Результат придёт отдельным сообщением.',
         keyboard.as_markup(),
     )

@@ -90,25 +90,32 @@ async def receive_archive(message, state, catalog_import_service):
     await render_view(message, state, 'Введите название нового пака:', keyboard())
 
 
-async def _download(message, descriptor, service):
-    required = (descriptor.get('file_size') or service.archive_limit) + config.pack_import.disk_headroom_bytes
-    if shutil.disk_usage(tempfile.gettempdir()).free < required:
-        raise ValueError('Недостаточно свободного места для загрузки архива. Попробуйте позже.')
+async def _upload_archive_from_telegram(message, descriptor, service):
     local = getattr(settings, 'telegram_api_local', False)
     cache_root = Path(config.pack_import.bot_api_container_directory).resolve()
-    if local and shutil.disk_usage(cache_root).free < required:
-        raise ValueError('Недостаточно свободного места в хранилище Telegram. Попробуйте позже.')
+    transfer_root = cache_root if local else Path(tempfile.gettempdir())
+    required = (descriptor.get('file_size') or service.archive_limit) + config.pack_import.disk_headroom_bytes
+    if shutil.disk_usage(transfer_root).free < required:
+        raise ValueError('Недостаточно свободного места для загрузки архива. Попробуйте позже.')
     remote = await message.bot.get_file(descriptor['file_id'], request_timeout=config.pack_import.download_timeout_seconds)
     if remote.file_size is not None and remote.file_size > service.archive_limit:
         raise ValueError('ZIP превышает допустимый размер.')
     if not isinstance(remote.file_path, str) or not remote.file_path:
         raise ValueError('Telegram ещё не подготовил архив для скачивания. Повторите ввод названия позже.')
-    if local and not Path(remote.file_path).resolve().is_relative_to(cache_root):
-        raise ValueError('Telegram вернул недопустимый путь к архиву.')
-    # getFile may itself have filled the Local Bot API cache on the same disk.
-    required = (remote.file_size or service.archive_limit) + config.pack_import.disk_headroom_bytes
-    if shutil.disk_usage(tempfile.gettempdir()).free < required:
-        raise ValueError('Недостаточно свободного места для копирования архива. Попробуйте позже.')
+    expected_size = remote.file_size if remote.file_size is not None else descriptor.get('file_size')
+    if local:
+        path = Path(remote.file_path).resolve()
+        if not path.is_relative_to(cache_root):
+            raise ValueError('Telegram вернул недопустимый путь к архиву.')
+        # getFile may itself have filled the shared cache. Preserve room for
+        # storage writes, without depending on the bot's temporary directory.
+        required = (expected_size or service.archive_limit) + config.pack_import.disk_headroom_bytes
+        if shutil.disk_usage(cache_root).free < required:
+            raise ValueError('Недостаточно свободного места для передачи архива в MinIO. Попробуйте позже.')
+        return await service.upload_archive(path, descriptor['import_id'], expected_size=expected_size)
+    required = (expected_size or service.archive_limit) + config.pack_import.disk_headroom_bytes
+    if shutil.disk_usage(transfer_root).free < required:
+        raise ValueError('Недостаточно свободного места для скачивания архива. Попробуйте позже.')
     with tempfile.TemporaryDirectory(prefix=config.pack_import.temp_prefix) as directory:
         path = Path(directory) / config.pack_import.archive_filename
         with path.open('wb+') as stream:
@@ -116,7 +123,7 @@ async def _download(message, descriptor, service):
                 remote.file_path, BoundedWriter(stream, service.archive_limit),
                 timeout=config.pack_import.download_timeout_seconds,
             )
-        return await service.upload_archive(path, descriptor['import_id'])
+        return await service.upload_archive(path, descriptor['import_id'], expected_size=expected_size)
 
 
 async def receive_name(message, state, user_repository, catalog_import_service, uow):
@@ -145,7 +152,7 @@ async def receive_name(message, state, user_repository, catalog_import_service, 
         if snapshot is None:
             gate = catalog_import_service.upload_gate
             async with gate.acquire(message.from_user.id) if gate is not None else nullcontext():
-                reference = data.get('pack_import_reference') or await _download(message, descriptor, catalog_import_service)
+                reference = data.get('pack_import_reference') or await _upload_archive_from_telegram(message, descriptor, catalog_import_service)
             await state.update_data(pack_import_reference=reference)
             request = CatalogImportRequest(
                 import_id=import_id, actor_id=message.from_user.id,
@@ -158,8 +165,8 @@ async def receive_name(message, state, user_repository, catalog_import_service, 
         accepted = await catalog_import_service.submit(snapshot)
     except ImportSubmissionUncertain:
         await render_view(message, state,
-            f'Приём импорта {import_id} уточняется. Нажмите проверку статуса или повторите ввод названия. '
-            'Повтор использует тот же архив и запрос.',
+            'Статус загрузки уточняется. Нажмите «Проверить статус» или повторите ввод названия. '
+            'Архив повторно загружать не нужно.',
             keyboard([('Проверить статус', f'pack_import:status:{import_id}')]),
         )
         return
@@ -173,7 +180,7 @@ async def render_status(event, state, service, uow, job):
     status = job['status']
     request = job['request']
     progress = job.get('progress') or {}
-    text = f'Пак: {request["display_name"]}\nИмпорт: {job["_id"]}\nСтатус: {STATUS_LABELS.get(status, "уточняется")}.'
+    text = f'Пак: {request["display_name"]}\nСтатус: {STATUS_LABELS.get(status, "уточняется")}.'
     if status == 'running':
         phase = PHASE_LABELS.get(progress.get('phase'))
         if phase:

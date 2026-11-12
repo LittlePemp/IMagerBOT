@@ -263,7 +263,8 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         await self.notifier.deliver_once()
         self.bot.send_document.assert_not_awaited()
         self.assertNotIn('Invalid image', self.bot.send_message.await_args.kwargs['text'])
-        self.assertIn('job-1', self.bot.send_message.await_args.kwargs['text'])
+        self.assertNotIn('job-1', self.bot.send_message.await_args.kwargs['text'])
+        self.assertNotIn('задани', self.bot.send_message.await_args.kwargs['text'].lower())
         self.service.acknowledge_completion.assert_awaited_once_with('job-1', 'lease-1', 78)
 
     async def test_lost_delivery_lease_prevents_sending(self):

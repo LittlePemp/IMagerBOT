@@ -155,6 +155,39 @@ class TestIndependentProjection(unittest.IsolatedAsyncioTestCase):
         self.service.fail_history_projection.assert_awaited_once()
         self.service.fail_completion.assert_not_awaited()
 
+    async def test_ready_caption_and_legacy_filename_hide_generation_identity(self):
+        private_id = 'eac94427-9dc9-5b5b-b55c-2bf4d891eb31'
+        self.job['_id'] = private_id
+        self.job['created_at'] = datetime(2026, 11, 12, 13, 14, tzinfo=timezone.utc)
+        self.job['request']['client_context']['display_name'] = f'imager_{private_id}'
+        await self.notifier.deliver_once()
+        sent = self.bot.send_document.await_args.kwargs
+        self.assertEqual(sent['caption'], 'Ваше изображение готово.')
+        self.assertNotIn(private_id, sent['document'].filename)
+        self.assertNotIn(private_id.replace('-', ''), sent['document'].filename)
+        self.assertIn('20261112T131400', sent['document'].filename)
+        self.assertTrue(sent['document'].filename.endswith('.' + config.render.output_extension))
+        self.service.acknowledge_completion.assert_awaited_once_with(private_id, 'send-token', 77)
+
+    async def test_frozen_full_filename_is_sent_once_without_double_extension(self):
+        filename = 'Alice_20261112T131400000000Z_aabbccddeeff.jpg'
+        self.job['request']['client_context']['display_name'] = filename
+        await self.notifier.deliver_once()
+        sent = self.bot.send_document.await_args.kwargs
+        self.assertEqual(sent['document'].filename, filename)
+        self.assertEqual(sent['caption'], 'Ваше изображение готово.')
+
+    async def test_failed_generation_message_has_no_identity_or_reference_request(self):
+        private_id = 'eac94427-9dc9-5b5b-b55c-2bf4d891eb31'
+        self.job.update(_id=private_id, status='failed', error=f'Internal failure for {private_id}')
+        await self.notifier.deliver_once()
+        sent = self.bot.send_message.await_args.kwargs['text']
+        self.assertNotIn(private_id, sent)
+        self.assertNotIn('задан', sent.casefold())
+        self.assertNotIn('номер', sent.casefold())
+        self.bot.send_document.assert_not_awaited()
+        self.service.acknowledge_completion.assert_awaited_once_with(private_id, 'send-token', 78)
+
     async def test_history_can_recover_after_result_was_already_sent(self):
         self.job['completion_outbox']['state'] = 'sent'
         await self.notifier.repair_history_once()
