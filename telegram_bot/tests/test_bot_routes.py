@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, Chat, Message, Update, User as Telegram
 
 from src.commands.admin_panel.image_build_params.common_params.common_params_states import CommonParamsStates
 from src.commands.image_generation.image_generation_states import ImageGenerationStates as GenerationStates
+from src.commands.image_generation.upload import generation_job_id
 from src.models.image_build_params import CommonParam, ParamType
 from src.models.image_group import ImageGroup
 from src.models.user import User, UserStatus
@@ -83,9 +84,9 @@ class BotRouteTests(unittest.IsolatedAsyncioTestCase):
         self.presets = {
             kind: [CommonParam(name=name, value=value, type=kind)]
             for kind, name, value in (
-                (ParamType.IMAGE_SIZE, 'Размер', 120),
-                (ParamType.NOISE_LEVEL, 'Шум', 15),
-                (ParamType.INSET_SIZE, 'Ячейка', 40),
+                (ParamType.IMAGE_SIZE, 'Средний', 64),
+                (ParamType.NOISE_LEVEL, 'Средний', 30),
+                (ParamType.INSET_SIZE, 'Средний', 40),
             )
         }
         library = ImageGroup(imager_name='icons', display_name='Иконки', count=2, last_synced=now)
@@ -186,13 +187,47 @@ class BotRouteTests(unittest.IsolatedAsyncioTestCase):
         await self.send(3, '/menu')
         await self.click(3, title='Собрать изображение')
         await self.click(3, title='Из пресетов')
-        for choice in ('Размер', 'Шум', 'Ячейка', 'Иконки'):
-            await self.click(3, title=choice)
+        await self.click(3, title='Средний')
+        self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_group.state)
+        # Back from libraries returns to whole profiles, not a retired numeric
+        # parameter step. Selecting a profile again resolves all three values.
+        await self.click(3, title='Назад')
+        self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_size.state)
+        self.assertIn('Выберите пресет', self.session.last[3].text)
+        await self.click(3, title='Средний')
+        await self.click(3, title='Иконки')
         self.assertEqual(await self.state(3).get_state(), GenerationStates.waiting_for_image_upload.state)
         data = await self.state(3).get_data()
         self.assertEqual((data['image_size'], data['noise_level'], data['inset_size'], data['image_group']),
-                         (120, 15, 40, 'icons'))
+                         (64, 30, 40, 'icons'))
+        self.assertEqual(set(data['selected_presets']), {'image_size', 'noise_level', 'inset_size'})
         self.assertIn('Отправьте изображение', self.session.last[3].text)
+        await self.click(3, title='Назад')
+        self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_group.state)
+        await self.click(3, title='Иконки')
+
+        self.sequence += 1
+        self.clock += 2
+        photo = Message(
+            message_id=self.sequence, date=datetime.now(timezone.utc),
+            chat=Chat(id=3, type='private'), from_user=self.actor(3),
+            photo=[{'file_id': 'offline-photo', 'file_unique_id': 'photo-identity',
+                    'width': 256, 'height': 256}],
+        ).as_(self.bot)
+        job_id = generation_job_id(photo)
+        accepted = AsyncMock(return_value=SimpleNamespace(job_id=job_id, duplicate=False))
+        progress = AsyncMock()
+        self.dispatcher['generation_service'] = SimpleNamespace(execute=accepted, gateway=SimpleNamespace())
+        self.dispatcher['generation_progress'] = SimpleNamespace(watch=progress)
+        await self.dispatcher.feed_update(self.bot, Update(update_id=self.sequence, message=photo))
+        submitted = accepted.await_args.kwargs
+        self.assertEqual(submitted['actor_id'], 3)
+        self.assertEqual(submitted['job_id'], job_id)
+        draft = submitted['draft']
+        self.assertEqual((draft['image_size'], draft['noise_level'], draft['inset_size'], draft['image_group']),
+                         (64, 30, 40, 'icons'))
+        progress.assert_awaited_once()
+        self.assertEqual(progress.await_args.kwargs, {'job_id': job_id, 'actor_id': 3, 'duplicate': False})
 
     async def test_menu_and_cancel_clear_user_and_admin_input_states(self):
         for command in ('/menu', '/cancel'):

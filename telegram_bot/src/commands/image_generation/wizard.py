@@ -5,6 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from imager_config.loader import config
 from src.application.generation import validate_output
+from src.application.generation_presets import list_generation_profiles, load_profile_defaults
 from src.commands.common_keyboards import home_keyboard
 from src.models.image_build_params import CommonParam, ParamType
 from src.utils.navigation import render_view
@@ -46,24 +47,25 @@ async def choose_mode(callback, state, uow):
 
 
 async def show_presets(event, state, uow, step, page=0):
-    kind, _, fsm, _, title = STEPS[step]
-    result = await uow.image_build_params_repository.get_common_params(kind)
-    values = result.value if result.is_success else []
+    values = await list_generation_profiles(uow.image_build_params_repository)
     page = max(0, min(page, max(0, (len(values) - 1) // config.bot.ui_page_size)))
     start_index = page * config.bot.ui_page_size
-    buttons = [(f'{item.name}: {item.value}', f'pick:{index}')
+    buttons = [(f"{item['name']}: " + ' / '.join(str(item['parameters'][kind.value]['value'])
+                                               for kind, *_ in STEPS), f'pick:{index}')
                for index, item in enumerate(values) if start_index <= index < start_index + config.bot.ui_page_size]
     if page:
-        buttons.append(('← Предыдущая', f'preset_page:{step}:{page - 1}'))
+        buttons.append(('← Предыдущая', f'preset_page:0:{page - 1}'))
     if start_index + config.bot.ui_page_size < len(values):
-        buttons.append(('Следующая →', f'preset_page:{step}:{page + 1}'))
+        buttons.append(('Следующая →', f'preset_page:0:{page + 1}'))
     buttons.append(('Назад', 'back'))
-    await state.update_data(preset_step=step, current_presets={
-        str(index): value.model_dump(mode='json') for index, value in enumerate(values)
+    await state.update_data(preset_step=0, current_presets={
+        str(index): value for index, value in enumerate(values)
         if start_index <= index < start_index + config.bot.ui_page_size
     })
-    await state.set_state(fsm)
-    await render_view(event, state, title if values else 'Для этого шага пока нет допустимых пресетов.', keyboard(buttons))
+    await state.set_state(S.selecting_image_size)
+    await render_view(event, state,
+        'Выберите пресет (размер / шум / ширина ячейки):' if values else 'Пока нет доступных пресетов.',
+        keyboard(buttons))
 
 
 async def preset_page(callback, state, uow):
@@ -74,37 +76,32 @@ async def preset_page(callback, state, uow):
 
 async def pick_preset(callback, state, uow):
     data = await state.get_data()
-    step = data['preset_step']
-    selected = CommonParam(**data['current_presets'][callback.data.split(':')[1]])
-    current = await uow.image_build_params_repository.get_common_params(selected.type)
-    if not current.is_success or not any(item == selected for item in current.value):
+    selected = data.get('current_presets', {}).get(callback.data.split(':')[1])
+    current = await list_generation_profiles(uow.image_build_params_repository)
+    if selected is None or selected not in current:
         await callback.answer('Пресет изменён. Обновите выбор.')
-        await show_presets(callback, state, uow, step)
+        await show_presets(callback, state, uow, 0)
         return
-    choices = dict(data.get('selected_presets', {}))
-    choices[selected.type.value] = selected.model_dump(mode='json')
-    await state.update_data(**{STEPS[step][1]: selected.value, 'selected_presets': choices})
-    if step < len(STEPS) - 1:
-        await show_presets(callback, state, uow, step + 1)
-    else:
-        try:
-            validate_output((await state.get_data())['image_size'], selected.value)
-        except ValueError as error:
-            await callback.answer(str(error), show_alert=True)
-            await show_presets(callback, state, uow, step)
-            return
-        await show_groups(callback, state, uow)
+    choices = selected['parameters']
+    values = {field: choices[kind.value]['value'] for kind, field, *_ in STEPS}
+    try:
+        validate_output(values['image_size'], values['inset_size'])
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        await show_presets(callback, state, uow, 0)
+        return
+    await state.update_data(**values, selected_presets=choices)
+    await show_groups(callback, state, uow)
     await callback.answer()
 
 
 async def show_manual(event, state, uow, step):
     kind, field, _, fsm, title = STEPS[step]
-    prefs = await uow.user_repository.get_generation_preferences(event.from_user.id) or {}
     defaults = (config.generation.result_size, config.generation.noise_level, config.generation.cell_size)
-    try:
-        default = CommonParam(name=title, type=kind, value=prefs.get(field, defaults[step])).value
-    except ValueError:
-        default = defaults[step]
+    recommended_name, _ = load_profile_defaults()
+    profiles = await list_generation_profiles(uow.image_build_params_repository)
+    recommended = next((profile for profile in profiles if profile['name'] == recommended_name), None)
+    default = recommended['parameters'][kind.value]['value'] if recommended else defaults[step]
     await state.set_state(fsm)
     await render_view(event, state, f'{title}: введите целое число. Рекомендуемое значение: {default}.', keyboard([('Назад', 'back')]))
 
@@ -182,7 +179,7 @@ async def back(callback, state, uow):
         await show_groups(callback, state, uow)
     elif current == S.selecting_image_group.state:
         await (show_manual(callback, state, uow, 2) if data.get('generation_mode') == 'manual'
-               else show_presets(callback, state, uow, 2))
+               else show_presets(callback, state, uow, 0))
     else:
         step = next((index for index, item in enumerate(STEPS) if current in (item[2].state, item[3].state)), 0)
         if not step:

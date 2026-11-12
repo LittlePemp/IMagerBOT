@@ -1,0 +1,20 @@
+# Initial editable Mongo presets. Seeding changes these names only.
+recommended = "Средний"
+
+[[profiles]]
+name = "Большой"
+image_size = 90
+noise_level = 30
+inset_size = 40
+
+[[profiles]]
+name = "Средний"
+image_size = 64
+noise_level = 30
+inset_size = 40
+
+[[profiles]]
+name = "Маленький"
+image_size = 32
+noise_level = 30
+inset_size = 32

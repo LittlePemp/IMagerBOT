@@ -237,9 +237,9 @@ catalog_sync_seconds = 5.0
 [generation]
 insertion_format = "crop"
 alpha_channel = 30
-noise_level = 15
+noise_level = 30
 cell_size = 40
-result_size = 120
+result_size = 64
 
 [paths]
 image_groups = "files/groups"
