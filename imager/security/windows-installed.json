@@ -1,0 +1,280 @@
+{
+  "schema_version": 1,
+  "based_on_commit": "262bafb",
+  "audited_at_utc": "2026-11-12T09:41:30.741446+00:00",
+  "tool": {
+    "name": "pip-audit",
+    "version": "2.10.1",
+    "service": "pypi",
+    "ignored_advisories": []
+  },
+  "scope": "Fresh isolated Windows environment installed from the target hash lock",
+  "target": "windows-amd64",
+  "python": "3.12",
+  "lock": {
+    "file": "imager/requirements-windows-py312.txt",
+    "sha256": "3b8a34e6609734094dc099ebcbb20ce8d0d34c961e38249df81b7543d7e16cbb"
+  },
+  "dependency_count": 51,
+  "unique_advisories": 0,
+  "affected_packages": 0,
+  "skipped_packages": [],
+  "dependencies": [
+    {
+      "name": "aio-pika",
+      "version": "9.6.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "aiormq",
+      "version": "6.9.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "annotated-doc",
+      "version": "0.0.6",
+      "vulnerabilities": []
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.8.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "anyio",
+      "version": "4.16.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "argon2-cffi",
+      "version": "25.1.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "argon2-cffi-bindings",
+      "version": "26.1.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "certifi",
+      "version": "2026.10.23",
+      "vulnerabilities": []
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "click",
+      "version": "8.5.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "vulnerabilities": []
+    },
+    {
+      "name": "dnspython",
+      "version": "2.9.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "eventsourcing",
+      "version": "9.5.6",
+      "vulnerabilities": []
+    },
+    {
+      "name": "fastapi",
+      "version": "0.162.5",
+      "vulnerabilities": []
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "idna",
+      "version": "3.20",
+      "vulnerabilities": []
+    },
+    {
+      "name": "iniconfig",
+      "version": "2.3.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "loguru",
+      "version": "0.8.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "minio",
+      "version": "7.2.20",
+      "vulnerabilities": []
+    },
+    {
+      "name": "multidict",
+      "version": "7.2.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "nexus-rpc",
+      "version": "1.5.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "opencv-python-headless",
+      "version": "4.14.0.94",
+      "vulnerabilities": []
+    },
+    {
+      "name": "opentelemetry-api",
+      "version": "1.45.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pamqp",
+      "version": "3.3.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pip",
+      "version": "26.3",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pluggy",
+      "version": "1.7.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "prometheus-client",
+      "version": "0.26.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "propcache",
+      "version": "0.5.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "protobuf",
+      "version": "7.36.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pycparser",
+      "version": "3.12",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pycryptodome",
+      "version": "4.4.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pydantic",
+      "version": "2.14.3",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.50.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pydantic-settings",
+      "version": "2.16.2",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pygments",
+      "version": "2.21.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pymongo",
+      "version": "4.19.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "pytest",
+      "version": "9.2.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "python-dotenv",
+      "version": "1.2.4",
+      "vulnerabilities": []
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "starlette",
+      "version": "1.10.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "temporalio",
+      "version": "1.36.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "tqdm",
+      "version": "4.70.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "types-protobuf",
+      "version": "7.35.1.20260906",
+      "vulnerabilities": []
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.5",
+      "vulnerabilities": []
+    },
+    {
+      "name": "urllib3",
+      "version": "2.8.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "uvicorn",
+      "version": "0.54.0",
+      "vulnerabilities": []
+    },
+    {
+      "name": "win32-setctime",
+      "version": "1.2.1",
+      "vulnerabilities": []
+    },
+    {
+      "name": "yarl",
+      "version": "1.25.1",
+      "vulnerabilities": []
+    }
+  ],
+  "inventory_sha256": "9e9695ec7b08bf5a72150605df7e2dfa7d7348c631095366b1c99e0401ce8440"
+}

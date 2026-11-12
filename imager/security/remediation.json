@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "262bafb",
+  "baseline": {
+    "packages": 67,
+    "affected_packages": 5,
+    "raw_feed_records": 35,
+    "unique_advisories": 20,
+    "unique_cves": 20
+  },
+  "fixed_packages": [
+    {
+      "package": "pip",
+      "before": "25.0.1",
+      "after": "26.3",
+      "advisory_ids": [
+        "PYSEC-2026-1795",
+        "PYSEC-2026-1796",
+        "PYSEC-2026-2875",
+        "PYSEC-2026-2876",
+        "PYSEC-2026-196",
+        "PYSEC-2026-3721"
+      ],
+      "cve_ids": [
+        "CVE-2025-8869",
+        "CVE-2026-13346",
+        "CVE-2026-1703",
+        "CVE-2026-3219",
+        "CVE-2026-6357",
+        "CVE-2026-8643"
+      ]
+    },
+    {
+      "package": "pymongo",
+      "before": "4.8.0",
+      "after": "4.19.0",
+      "advisory_ids": [
+        "PYSEC-2026-4295",
+        "PYSEC-2026-4294",
+        "PYSEC-2026-4297",
+        "PYSEC-2026-4296",
+        "CVE-2026-106435"
+      ],
+      "cve_ids": [
+        "CVE-2026-106435",
+        "CVE-2026-88029",
+        "CVE-2026-96747",
+        "CVE-2026-96748",
+        "CVE-2026-96749"
+      ]
+    },
+    {
+      "package": "pytest",
+      "before": "8.2.2",
+      "after": "9.2.0",
+      "advisory_ids": [
+        "PYSEC-2026-1845"
+      ],
+      "cve_ids": [
+        "CVE-2025-71176"
+      ]
+    },
+    {
+      "package": "python-dotenv",
+      "before": "1.0.1",
+      "after": "1.2.4",
+      "advisory_ids": [
+        "PYSEC-2026-2270"
+      ],
+      "cve_ids": [
+        "CVE-2026-28684"
+      ]
+    },
+    {
+      "package": "starlette",
+      "before": "0.37.2",
+      "after": "1.10.0",
+      "advisory_ids": [
+        "PYSEC-2026-1943",
+        "PYSEC-2026-1941",
+        "PYSEC-2026-161",
+        "PYSEC-2026-2281",
+        "PYSEC-2026-2280",
+        "PYSEC-2026-249",
+        "PYSEC-2026-248"
+      ],
+      "cve_ids": [
+        "CVE-2024-47874",
+        "CVE-2025-54121",
+        "CVE-2026-48710",
+        "CVE-2026-48817",
+        "CVE-2026-48818",
+        "CVE-2026-54282",
+        "CVE-2026-54283"
+      ]
+    }
+  ],
+  "current": {
+    "linux_packages": 49,
+    "windows_packages": 51,
+    "known_advisories": 0,
+    "ignored_advisories": []
+  },
+  "validation": {
+    "windows_fresh_hash_install": "passed",
+    "windows_pip_check": "passed",
+    "windows_core_tests": {
+      "passed": 233,
+      "subtests_passed": 199
+    },
+    "linux_fresh_image_hash_install": "passed",
+    "linux_pip_check": "passed",
+    "linux_installed_audit": "passed",
+    "windows_installed_audit": "passed",
+    "offline_legacy_http": {
+      "metrics_status": 200,
+      "invalid_schema_status": 422,
+      "valid_json_generator_stopped_status": 503,
+      "json_without_content_type_status": 422
+    },
+    "linux_core_tests": {
+      "passed": 233,
+      "subtests_passed": 199,
+      "network": "disabled",
+      "fallback_packages": false
+    }
+  },
+  "limitations": [
+    "Python package advisory audit; base OS and native shared-library vulnerabilities are outside pip-audit scope."
+  ]
+}
