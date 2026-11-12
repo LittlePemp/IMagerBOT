@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "based_on_commit": "601e5fa",
+  "audited_at_utc": "2026-11-12T11:19:08.505796+00:00",
+  "target": "windows-amd64",
+  "python": "3.12",
+  "scope": "Fresh isolated native runtime installation before verification-only pytest; not a rebuilt bot image",
+  "tool": {
+    "name": "pip-audit",
+    "version": "2.10.1",
+    "service": "pypi",
+    "ignored_advisories": []
+  },
+  "lock": {
+    "file": "telegram_bot/requirements-windows-py312.txt",
+    "sha256": "7923f2067487d8c8ad1679a587693ed74c605b0a809ece9dfdcad26fcae1b570"
+  },
+  "installed_distributions": 35,
+  "known_advisories": 0,
+  "skipped_packages": [],
+  "pip_check": "passed",
+  "motor_lazy_client": "passed",
+  "legacy_package_fallback": false,
+  "dependencies": [
+    {
+      "name": "aiofiles",
+      "version": "25.1.0"
+    },
+    {
+      "name": "aiogram",
+      "version": "3.31.0"
+    },
+    {
+      "name": "aiohappyeyeballs",
+      "version": "2.7.1"
+    },
+    {
+      "name": "aiohttp",
+      "version": "3.14.5"
+    },
+    {
+      "name": "aiosignal",
+      "version": "1.4.0"
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.8.0"
+    },
+    {
+      "name": "argon2-cffi",
+      "version": "25.1.0"
+    },
+    {
+      "name": "argon2-cffi-bindings",
+      "version": "26.1.0"
+    },
+    {
+      "name": "attrs",
+      "version": "26.1.0"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.10.23"
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6"
+    },
+    {
+      "name": "dnspython",
+      "version": "2.9.2"
+    },
+    {
+      "name": "frozenlist",
+      "version": "1.8.0"
+    },
+    {
+      "name": "idna",
+      "version": "3.20"
+    },
+    {
+      "name": "loguru",
+      "version": "0.8.0"
+    },
+    {
+      "name": "magic-filter",
+      "version": "1.0.12"
+    },
+    {
+      "name": "minio",
+      "version": "7.2.20"
+    },
+    {
+      "name": "motor",
+      "version": "3.7.1"
+    },
+    {
+      "name": "multidict",
+      "version": "7.2.1"
+    },
+    {
+      "name": "pip",
+      "version": "26.3"
+    },
+    {
+      "name": "propcache",
+      "version": "0.5.4"
+    },
+    {
+      "name": "pycparser",
+      "version": "3.12"
+    },
+    {
+      "name": "pycryptodome",
+      "version": "4.4.0"
+    },
+    {
+      "name": "pydantic",
+      "version": "2.13.5"
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.5"
+    },
+    {
+      "name": "pydantic-settings",
+      "version": "2.16.2"
+    },
+    {
+      "name": "pymongo",
+      "version": "4.19.0"
+    },
+    {
+      "name": "python-dotenv",
+      "version": "1.2.4"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0"
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.5"
+    },
+    {
+      "name": "tzdata",
+      "version": "2026.6"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.8.0"
+    },
+    {
+      "name": "win32-setctime",
+      "version": "1.2.1"
+    },
+    {
+      "name": "yarl",
+      "version": "1.25.1"
+    }
+  ]
+}

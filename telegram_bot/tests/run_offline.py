@@ -22,9 +22,12 @@ def main():
     tempfile.tempdir = str(scratch)
     os.environ['TEMP'] = os.environ['TMP'] = str(scratch)
     os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
+    extra_dependencies = os.environ.get('IMAGER_TEST_DEPS')
     sys.path[:0] = [
-        str(root), str(repository), str(root / '.packages'),
-        str(repository / 'imager' / '.packages'),
+        str(root), str(repository),
+        *([extra_dependencies] if extra_dependencies else [
+            str(root / '.packages'), str(repository / 'imager' / '.packages'),
+        ]),
     ]
     from imager_config.loader import config
     configuration = types.ModuleType('settings')

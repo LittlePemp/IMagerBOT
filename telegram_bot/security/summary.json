@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "based_on_commit": "601e5fa",
+  "scope": "Bot dependency update only; runtime installations were verified, no bot image build/polling/Compose startup",
+  "baseline": {
+    "pinned_entries": 30,
+    "raw_advisory_records": 92,
+    "affected_packages": 8,
+    "distinct_advisory_identifiers": 54,
+    "distinct_cve_identifiers": 53,
+    "note": "Records and identifiers are not interchangeable counts of unique vulnerabilities."
+  },
+  "affected_package_actions": [
+    {
+      "package": "aiohttp",
+      "before": "3.9.5",
+      "after": "3.14.5",
+      "action": "updated"
+    },
+    {
+      "package": "anyio",
+      "before": "4.4.0",
+      "after": null,
+      "action": "removed_unused_dependency"
+    },
+    {
+      "package": "certifi",
+      "before": "2024.7.4",
+      "after": "2026.10.23",
+      "action": "updated"
+    },
+    {
+      "package": "dnspython",
+      "before": "2.6.1",
+      "after": "2.9.2",
+      "action": "updated"
+    },
+    {
+      "package": "h11",
+      "before": "0.14.0",
+      "after": null,
+      "action": "removed_unused_dependency"
+    },
+    {
+      "package": "idna",
+      "before": "3.7",
+      "after": "3.20",
+      "action": "updated"
+    },
+    {
+      "package": "pymongo",
+      "before": "4.8.0",
+      "after": "4.19.0",
+      "action": "updated"
+    },
+    {
+      "package": "python-dotenv",
+      "before": "1.0.1",
+      "after": "1.2.4",
+      "action": "updated"
+    }
+  ],
+  "runtime_after": {
+    "linux": {
+      "installed_distributions": 33,
+      "known_advisories": 0,
+      "skipped": 0,
+      "ignored": 0,
+      "pip_check": "passed",
+      "hash_install": "passed"
+    },
+    "windows": {
+      "installed_distributions": 35,
+      "known_advisories": 0,
+      "skipped": 0,
+      "ignored": 0,
+      "pip_check": "passed",
+      "hash_install": "passed"
+    }
+  },
+  "key_versions": {
+    "aiogram": "3.31.0",
+    "aiohttp": "3.14.5",
+    "motor": "3.7.1",
+    "pymongo": "4.19.0",
+    "pydantic": "2.13.5",
+    "pydantic-settings": "2.16.2",
+    "minio": "7.2.20",
+    "loguru": "0.8.0",
+    "pip": "26.3",
+    "urllib3": "2.8.0",
+    "tzdata": "2026.6"
+  },
+  "removed_from_runtime": [
+    "aio-pika",
+    "aiormq",
+    "pamqp",
+    "httpcore",
+    "anyio",
+    "h11",
+    "sniffio"
+  ],
+  "verification": {
+    "pytest": "9.2.0, verification-only; excluded from production locks",
+    "linux": {
+      "tests_passed": 15,
+      "seconds": 13.11,
+      "warnings": 1,
+      "network": "disabled",
+      "command": "docker run --rm --name imager-audit-bot-tests --memory=768m --cpus=1 --network none --mount type=bind,source=E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update,target=/audit --mount type=bind,source=D:\\Projects\\IMagerBOT-1,target=/workspace,readonly -e TMPDIR=/audit/tmp -e TEMP=/audit/tmp -e TMP=/audit/tmp -e IMAGER_TEST_TEMP=/audit/tmp -e IMAGER_TEST_DEPS=/audit/linux-runtime/lib/python3.12/site-packages --entrypoint /audit/linux-runtime/bin/python imager-temporal/core:local -I -B /workspace/telegram_bot/tests/run_offline.py --capture=sys",
+      "import_proof": {
+        "aiogram": "/audit/linux-runtime/lib/python3.12/site-packages/aiogram/__init__.py",
+        "motor": "/audit/linux-runtime/lib/python3.12/site-packages/motor/__init__.py",
+        "pydantic": "/audit/linux-runtime/lib/python3.12/site-packages/pydantic/__init__.py",
+        "pymongo": "/audit/linux-runtime/lib/python3.12/site-packages/pymongo/__init__.py"
+      },
+      "legacy_package_fallback": false,
+      "motor_lazy_client_connect_false": "passed"
+    },
+    "windows": {
+      "tests_passed": 15,
+      "seconds": 4.53,
+      "warnings": 1,
+      "command": "$env:IMAGER_TEST_DEPS='E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Lib\\site-packages'; $env:IMAGER_TEST_TEMP='E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\tmp'; & 'E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Scripts\\python.exe' -I -B telegram_bot\\tests\\run_offline.py",
+      "import_proof": {
+        "aiogram": "E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Lib\\site-packages\\aiogram\\__init__.py",
+        "motor": "E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Lib\\site-packages\\motor\\__init__.py",
+        "pydantic": "E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Lib\\site-packages\\pydantic\\__init__.py",
+        "pymongo": "E:\\IMagerBOT-1-runtime\\audit-v1\\bot-update\\windows-runtime\\Lib\\site-packages\\pymongo\\__init__.py"
+      },
+      "legacy_package_fallback": false,
+      "motor_lazy_client_connect_false": "passed"
+    },
+    "warning": "Existing ImageGroup class-based Pydantic Config deprecation; no compatibility code changes required."
+  },
+  "limits": {
+    "ephemeral_container_memory": "768m",
+    "ephemeral_container_cpus": 1,
+    "temporary_files_caches_environments_root": "E:/IMagerBOT-1-runtime/audit-v1/bot-update",
+    "live_telegram_calls": false,
+    "bot_polling": false,
+    "compose_startup": false,
+    "new_bot_image_build": false
+  },
+  "method": {
+    "lock_converter": "imager/security/lock_from_report.py (unchanged)",
+    "resolution": "Native pip --dry-run --ignore-installed --only-binary=:all: --report; converted exact target wheel hashes",
+    "auditing": "pip-audit2.10.1 installed inventories, without skips/ignores",
+    "reports": "Compact sanitized package/advisory data only; full installer plans and caches remain outside repository."
+  }
+}
