@@ -221,6 +221,11 @@ services:
         target: /data
     ports:
       - 127.0.0.1:${MINIO_CONSOLE_PORT:?Run infra/setup.py}:9001
+    # Only the gateway can reach the storage API. The console stays host-local.
+    networks:
+      minio-backend:
+        aliases:
+          - minio-storage
     healthcheck:
       test:
         - CMD
@@ -233,6 +238,26 @@ services:
       timeout: 5s
       retries: 60
     mem_limit: 384000000
+  minio-gateway:
+    image: nginx:1.28.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 64000000
+    volumes:
+      - ./nginx/minio-gateway.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      default:
+        aliases:
+          - minio
+      minio-backend: {}
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9000/minio/health/ready]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   imager-dispatcher:
     image: imager-temporal/core:local
     build: *core-build
@@ -246,7 +271,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
       temporal-namespace:
         condition: service_completed_successfully
@@ -272,7 +297,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
       temporal-namespace:
         condition: service_completed_successfully
@@ -300,7 +325,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
       temporal-namespace:
         condition: service_completed_successfully
@@ -382,7 +407,7 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
     mem_limit: 256000000
   import-catalog:
@@ -399,7 +424,7 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
     profiles:
       - tools
@@ -410,6 +435,10 @@ services:
       - /imports
     secrets: *client-tls-secrets
     mem_limit: 1000000000
+networks:
+  default: {}
+  minio-backend:
+    internal: true
 secrets:
   temporal_ui_htpasswd:
     file: ${IMAGER_TEMPORAL_UI_AUTH_FILE:?Run infra/setup.py}

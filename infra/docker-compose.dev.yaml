@@ -35,7 +35,7 @@ x-core: &core
       condition: service_healthy
     temporal:
       condition: service_healthy
-    minio:
+    minio-gateway:
       condition: service_healthy
 
 services:
@@ -73,11 +73,37 @@ services:
         target: /data
     ports:
       - "127.0.0.1:${MINIO_CONSOLE_PORT:?Run infra/setup.py}:9001"
+    # Storage is reachable only by the gateway; the console remains host-local.
+    networks:
+      minio-backend:
+        aliases:
+          - minio-storage
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 60
+
+  minio-gateway:
+    image: nginx:1.28.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 64000000
+    volumes:
+      - ./nginx/minio-gateway.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      default:
+        aliases:
+          - minio
+      minio-backend: {}
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   temporal:
     image: temporalio/temporal:1.10.0
@@ -223,7 +249,7 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
-      minio:
+      minio-gateway:
         condition: service_healthy
 
   import-catalog:
@@ -234,6 +260,11 @@ services:
     volumes:
       - *config-volume
       - ${IMAGER_IMPORT_ROOT:?Run infra/setup.py}:/imports:ro
+
+networks:
+  default: {}
+  minio-backend:
+    internal: true
 
 secrets:
   temporal_ui_htpasswd:

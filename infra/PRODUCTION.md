@@ -94,10 +94,11 @@ mode 0600: это устраняет несовместимость провер
 Сертификат CA даёт доверенному клиенту доступ к Temporal API; отдельного RBAC/
 identity provider здесь нет. UI HTTP опубликован только на loopback; для удалённого
 доступа нужен защищённый tunnel либо внешний HTTPS endpoint с контролем доступа.
-MongoDB и MinIO работают в закрытой Docker-сети с password authentication.
+MongoDB работает в закрытой Docker-сети с password authentication. Доступ
+приложений к MinIO проходит через отдельный gateway, описанный ниже.
 
 Сумма memory limits долгоживущих сервисов с одним render worker, одним
-catalog-import-worker, локальным Telegram Bot API и ботом — 5.112 GB, без учёта
+catalog-import-worker, MinIO gateway, локальным Telegram Bot API и ботом — 5.176 GB, без учёта
 Docker/OS. Дополнительный
 worker каждого типа требует ещё до 1 GB. Импорт ZIP использует отдельную
 Temporal queue и собственный scratch-каталог. Ротация контейнерных логов
@@ -108,6 +109,59 @@ Temporal queue и собственный scratch-каталог. Ротация 
 Не меняйте `history_shards` после создания persistence. Перед upgrade сохраните
 backup, используйте matching версии server/admin-tools и выполняйте поддерживаемую
 последовательность обновления Temporal. Локальная CA не заменяет backup или HA.
+
+## Ограничение уязвимых операций Community MinIO
+
+Собираемый `RELEASE.2025-10-15T17-29-55Z` остаётся затронутым опубликованными
+advisories. `minio-gateway` применяет proxy workarounds для используемых IMager
+операций. Это **mitigation, а не исправленный бинарник или отсутствие CVE**;
+переход на другой продукт или лицензию этим изменением не выполняется.
+
+В обоих compose-файлах настоящий сервис `minio` подключён только к отдельной
+`internal` сети `minio-backend`. К ней подключён также gateway, обращающийся к
+`minio-storage:9000`. В основной сети имя `minio:9000` принадлежит gateway:
+настройки SDK остаются прежними, прямого маршрута к backend у приложений нет.
+Gateway использует тот же nginx image, что и Temporal UI, с лимитом 64 MB.
+S3-порт на хост не публикуется; MinIO Console сохраняет прежний loopback-порт.
+
+Файл `nginx/minio-gateway.conf`:
+
+* Блокирует unsigned-trailer marker в `X-Amz-Content-Sha256`, включая другой
+  регистр, окружающие пробелы и повторяющиеся значения заголовка. Это workaround
+  для [query-credential signature bypass](https://github.com/minio/minio/security/advisories/GHSA-hv4r-mvr4-25vw)
+  и [Snowball auto-extract bypass](https://github.com/minio/minio/security/advisories/GHSA-9c4q-hq6p-c237).
+* Запрещает POST с query-параметрами `select` или `select-type` независимо от
+  порядка, регистра и однократного percent-encoding имени. Это отключает
+  [уязвимый S3 Select](https://github.com/minio/minio/security/advisories/GHSA-h749-fxx7-pwpg),
+  который IMager не использует.
+* Удаляет шесть replication-заголовков, которые
+  [pinned source преобразует во внутренние метаданные](https://github.com/minio/minio/blob/RELEASE.2025-10-15T17-29-55Z/cmd/handler-utils.go#L99).
+  Параметры query `X-Minio-Replication-*` также запрещены: MinIO извлекает
+  метаданные и из query/form. Browser-form загрузки (`multipart/form-data`,
+  `application/x-www-form-urlencoded`) отключены. Это ограничивает
+  [SSE metadata injection](https://github.com/minio/minio/security/advisories/GHSA-3rh2-v3gr-35p9).
+  Multipart через SDK использует обычные POST/PUT и продолжает поддерживаться.
+
+Остальные заголовки, Host с портом, исходный URI и query проходят без изменения
+для SigV4. Request/response buffering отключён: большие ZIP не копируются в
+временные файлы nginx. Query и авторизация не записываются в access log.
+
+Защита действует только для трафика через gateway. Console и доступ владельца
+Docker/хоста считаются административными; дополнительные сети, публикация API
+backend или прямое подключение другого клиента обходят эти ограничения.
+Репликация, browser-form upload и S3 Select здесь намеренно не поддерживаются.
+Новые advisories, другие операции и base-image CVE нужно проверять отдельно.
+При применении изменения к существующему стеку надо пересоздать его MinIO и
+клиентские контейнеры, чтобы прежний прямой network route исчез.
+
+`imager/tests/infrastructure/test_minio_gateway.py` проверяет compose topology
+через `docker compose config` без запуска сервисов. Опциональные HTTP-тесты
+работают только с отдельным stub upstream с маркером `isolated-stub`:
+`IMAGER_MINIO_GATEWAY_TEST_ALLOW=isolated-stub` и
+`IMAGER_MINIO_GATEWAY_TEST_URL=http://<isolated-gateway>:9000`.
+Тот же файл в режиме `--serve-upstream` запускает только тестовый upstream.
+Перед развёртыванием нужны `nginx -t`, эти HTTP-проверки и обычный MinIO SDK
+roundtrip через gateway в отдельном fixture, включая multipart upload.
 
 ## Проверенные официальные источники
 
