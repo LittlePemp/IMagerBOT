@@ -5,12 +5,12 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from temporalio.client import Client
 from temporalio.worker import Worker
 
 from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository, create_render_executor
+from src.infrastructure.temporal_client import connect_temporal_client
 from src.presentation.temporal.activities import RenderActivities
 from src.presentation.temporal.workflows import GenerateImageWorkflow
 from src.shared_kernel.loggers import presentation_logger
@@ -19,10 +19,7 @@ from src.shared_kernel.loggers import presentation_logger
 async def connect_temporal():
     while True:
         try:
-            return await Client.connect(
-                settings.temporal_address,
-                namespace=settings.temporal_namespace,
-            )
+            return await connect_temporal_client(settings)
         except asyncio.CancelledError:
             raise
         except Exception:

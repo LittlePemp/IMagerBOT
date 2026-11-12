@@ -157,6 +157,15 @@ class RuntimeTemporalFailureConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeTemporalTLSConfig:
+    enabled: bool
+    root_ca_cert: str
+    client_cert: str
+    client_key: str
+    server_name: str
+
+
+@dataclass(frozen=True)
 class RuntimeTemporalConfig:
     address: str
     namespace: str
@@ -166,6 +175,7 @@ class RuntimeTemporalConfig:
     dispatcher: RuntimeTemporalDispatcherConfig
     render: RuntimeTemporalRenderConfig
     failure: RuntimeTemporalFailureConfig
+    tls: RuntimeTemporalTLSConfig
 
 
 @dataclass(frozen=True)
@@ -253,9 +263,40 @@ class RuntimeLoggingConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeProductionConfig:
+    env_file: str
+    data_directory: str
+    secrets_directory: str
+    postgres_directory: str
+    postgres_user: str
+    postgres_database: str
+    visibility_database: str
+    postgres_password_random_bytes: int
+    tls_directory: str
+    ca_certificate: str
+    ca_private_key: str
+    server_certificate: str
+    server_private_key: str
+    client_certificate: str
+    client_private_key: str
+    postgres_certificate: str
+    postgres_private_key: str
+    certificate_days: int
+    ca_certificate_days: int
+    rsa_key_bits: int
+    temporal_ui_port: int
+    minio_console_port: int
+    history_shards: int
+    namespace_retention_days: int
+    namespace_startup_attempts: int
+    namespace_retry_seconds: float
+
+
+@dataclass(frozen=True)
 class RuntimeDeploymentConfig:
     temporal_ui_port: int
     minio_console_port: int
+    production: RuntimeProductionConfig
 
 
 @dataclass(frozen=True)

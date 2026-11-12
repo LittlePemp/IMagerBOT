@@ -2,11 +2,13 @@ import base64
 import hashlib
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from infra.certificates import ensure_certificates, find_openssl
 
 
 SETUP = Path(__file__).resolve().parents[3] / 'infra' / 'setup.py'
@@ -16,6 +18,75 @@ spec.loader.exec_module(setup)
 
 
 class TestDeploymentSetup(unittest.TestCase):
+    def test_production_namespace_uses_same_sdk_image_and_tls_environment_as_worker(self):
+        compose = (SETUP.parent / 'docker-compose.prod.yaml').read_text(encoding='utf-8')
+        namespace = compose.split('  temporal-namespace:\n', 1)[1].split('  temporal-web:\n', 1)[0]
+        worker = compose.split('  imager-worker:\n', 1)[1].split('  telegram-bot:\n', 1)[0]
+        image = lambda block: re.search(r'^    image: (.+)$', block, re.MULTILINE).group(1)
+        self.assertEqual(image(namespace), image(worker))
+        self.assertIn('environment: *core-environment', namespace)
+        self.assertIn('secrets: *client-tls-secrets', namespace)
+        self.assertIn('- *config-volume', namespace)
+        self.assertIn('- src.presentation.temporal.namespace', namespace)
+        self.assertNotIn('TEMPORAL_TLS_', namespace)
+
+    def test_production_credentials_and_tls_are_separate_and_idempotent(self):
+        try:
+            openssl = find_openssl()
+        except ValueError:
+            self.skipTest('OpenSSL is not installed')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            development = setup.prepare(root, root / 'runtime')
+            development_bytes = development['env'].read_bytes()
+            production_config = replace(setup.config.deployment.production, rsa_key_bits=2048)
+            configured = replace(setup.config, deployment=replace(
+                setup.config.deployment, production=production_config,
+            ))
+            with patch.object(setup, 'config', configured):
+                production = setup.prepare(root, production=True, openssl=openssl)
+                values = setup.parse_env(production['env'])
+                production_bytes = production['env'].read_bytes()
+                certificate = Path(values['IMAGER_TLS_SERVER_CERT_FILE']).read_bytes()
+                again = setup.prepare(root, production=True, openssl=openssl)
+            self.assertEqual(development['env'].read_bytes(), development_bytes)
+            self.assertEqual(production['data'], root / 'runtime' / production_config.data_directory)
+            self.assertEqual(again, production)
+            self.assertEqual(Path(values['IMAGER_TLS_SERVER_CERT_FILE']).read_bytes(), certificate)
+            self.assertNotEqual(values['MONGO_PASSWORD'], setup.parse_env(development['env'])['MONGO_PASSWORD'])
+            self.assertNotEqual(values['MINIO_SECRET_KEY'], setup.parse_env(development['env'])['MINIO_SECRET_KEY'])
+            self.assertEqual(production['env'].read_bytes(), production_bytes)
+            self.assertFalse(any(production_config.ca_private_key in value for value in values.values()))
+            self.assertTrue(Path(values['IMAGER_POSTGRES_DATA_PATH']).is_dir())
+            server_key = Path(values['IMAGER_TLS_SERVER_KEY_FILE'])
+            original_key = server_key.read_bytes()
+            server_key.write_bytes(Path(values['IMAGER_TLS_CLIENT_KEY_FILE']).read_bytes())
+            try:
+                with self.assertRaisesRegex(ValueError, 'does not match'):
+                    ensure_certificates(server_key.parent, production_config, openssl)
+            finally:
+                server_key.write_bytes(original_key)
+
+    def test_production_cannot_reuse_development_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            development = setup.prepare(root, root / 'runtime')
+            before = development['env'].read_bytes()
+            with self.assertRaisesRegex(ValueError, 'overlap'):
+                setup.prepare(root, root / 'runtime', production=True)
+            self.assertEqual(development['env'].read_bytes(), before)
+
+    def test_incomplete_production_tls_is_not_silently_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policy = setup.config.deployment.production
+            root = Path(directory)
+            certificate = root / policy.ca_certificate
+            certificate.write_text('existing CA', encoding='ascii')
+            with patch('infra.certificates.find_openssl', return_value='openssl'):
+                with self.assertRaisesRegex(ValueError, 'incomplete'):
+                    ensure_certificates(root, policy)
+            self.assertEqual(certificate.read_text(), 'existing CA')
+
     def test_generated_auth_and_credentials_are_stable_and_project_local(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

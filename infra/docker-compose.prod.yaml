@@ -1,5 +1,355 @@
-# This project does not silently label a SQLite development server production.
-# Deploy a supported Temporal Service (for example backed by PostgreSQL), then
-# provide its address and auth/TLS configuration to worker/dispatcher services.
-# See README.md, "Эксплуатационные границы". This file intentionally starts nothing.
-services: {}
+# PostgreSQL-backed single-host deployment. Run setup.py --production first.
+name: imager-temporal-prod
+x-logging: &logging
+  driver: local
+  options:
+    max-size: 10m
+    max-file: '3'
+x-config-volume: &config-volume
+  type: bind
+  source: ${IMAGER_CONFIG_SOURCE:?Run infra/setup.py}
+  target: /app/config/runtime.toml
+  read_only: true
+x-client-tls-secrets: &client-tls-secrets
+  - temporal_ca
+  - temporal_client_certificate
+  - temporal_client_private_key
+x-core-build: &core-build
+  context: ..
+  dockerfile: imager/Dockerfile
+x-core-environment: &core-environment
+  MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
+  IMAGER_CONFIG_FILE: /app/config/runtime.toml
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+  TEMPORAL_TLS_ENABLED: 'true'
+  TEMPORAL_TLS_ROOT_CA_CERT: /run/secrets/temporal_ca
+  TEMPORAL_TLS_CLIENT_CERT: /run/secrets/temporal_client_certificate
+  TEMPORAL_TLS_CLIENT_KEY: /run/secrets/temporal_client_private_key
+  TEMPORAL_TLS_SERVER_NAME: temporal
+services:
+  postgres:
+    restart: unless-stopped
+    logging: *logging
+    image: postgres:16.15-alpine
+    mem_limit: 512000000
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run production setup}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TEMPORAL_POSTGRES_USER: ${TEMPORAL_POSTGRES_USER:?Run production setup}
+      TEMPORAL_POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?Run production setup}
+      TEMPORAL_DATABASE: ${TEMPORAL_DATABASE:?Run production setup}
+      TEMPORAL_VISIBILITY_DATABASE: ${TEMPORAL_VISIBILITY_DATABASE:?Run production setup}
+    entrypoint:
+      - /bin/sh
+      - /scripts/start-postgres.sh
+    volumes:
+      - ${IMAGER_POSTGRES_DATA_PATH:?Run production setup}:/var/lib/postgresql/data
+      - ./postgres/start.sh:/scripts/start-postgres.sh:ro
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/10-temporal.sh:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    secrets:
+      - postgres_certificate
+      - postgres_private_key
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -h
+        - 127.0.0.1
+        - -U
+        - postgres
+        - -d
+        - postgres
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  temporal-schema:
+    restart: 'no'
+    logging: *logging
+    mem_limit: 192000000
+    image: temporalio/admin-tools:1.32.2
+    user: ${IMAGER_RUNTIME_UID:?Run production setup}:${IMAGER_RUNTIME_GID:?Run production setup}
+    environment:
+      SQL_HOST: postgres
+      SQL_PORT: '5432'
+      SQL_USER: ${TEMPORAL_POSTGRES_USER:?Run production setup}
+      SQL_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?Run production setup}
+      SQL_PLUGIN: postgres12
+      SQL_TLS: 'true'
+      SQL_TLS_CA_FILE: /run/secrets/temporal_ca
+      SQL_TLS_SERVER_NAME: postgres
+      TEMPORAL_DATABASE: ${TEMPORAL_DATABASE:?Run production setup}
+      TEMPORAL_VISIBILITY_DATABASE: ${TEMPORAL_VISIBILITY_DATABASE:?Run production setup}
+    command:
+      - /bin/sh
+      - /scripts/schema.sh
+    volumes:
+      - ./temporal/schema.sh:/scripts/schema.sh:ro
+    secrets:
+      - temporal_ca
+    depends_on:
+      postgres:
+        condition: service_healthy
+  temporal:
+    restart: unless-stopped
+    logging: *logging
+    image: temporalio/server:1.32.2
+    user: ${IMAGER_RUNTIME_UID:?Run production setup}:${IMAGER_RUNTIME_GID:?Run production setup}
+    mem_limit: 1000000000
+    environment:
+      TEMPORAL_POSTGRES_USER: ${TEMPORAL_POSTGRES_USER:?Run production setup}
+      TEMPORAL_POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?Run production setup}
+      TEMPORAL_DATABASE: ${TEMPORAL_DATABASE:?Run production setup}
+      TEMPORAL_VISIBILITY_DATABASE: ${TEMPORAL_VISIBILITY_DATABASE:?Run production setup}
+      TEMPORAL_HISTORY_SHARDS: ${TEMPORAL_HISTORY_SHARDS:?Run production setup}
+    entrypoint:
+      - /bin/sh
+      - /scripts/start-temporal.sh
+    volumes:
+      - ./temporal/start.sh:/scripts/start-temporal.sh:ro
+      - ./temporal/production.yaml:/etc/temporal/production.yaml:ro
+    secrets:
+      - temporal_ca
+      - temporal_server_certificate
+      - temporal_server_private_key
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+  temporal-namespace:
+    restart: 'no'
+    logging: *logging
+    mem_limit: 192000000
+    image: imager-temporal/core:local
+    build: *core-build
+    environment: *core-environment
+    command:
+      - python
+      - -m
+      - src.presentation.temporal.namespace
+    volumes:
+      - *config-volume
+    secrets: *client-tls-secrets
+    depends_on:
+      temporal:
+        condition: service_started
+  temporal-web:
+    restart: unless-stopped
+    logging: *logging
+    image: temporalio/ui:2.58.1
+    user: ${IMAGER_RUNTIME_UID:?Run production setup}:${IMAGER_RUNTIME_GID:?Run production setup}
+    mem_limit: 128000000
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_TLS_CA: /run/secrets/temporal_ca
+      TEMPORAL_TLS_CERT: /run/secrets/temporal_client_certificate
+      TEMPORAL_TLS_KEY: /run/secrets/temporal_client_private_key
+      TEMPORAL_TLS_SERVER_NAME: temporal
+      TEMPORAL_DEFAULT_NAMESPACE: ${IMAGER_TEMPORAL_NAMESPACE:?Run production setup}
+      TEMPORAL_TLS_ENABLE_HOST_VERIFICATION: 'true'
+    secrets: *client-tls-secrets
+    depends_on:
+      temporal-namespace:
+        condition: service_completed_successfully
+  temporal-ui:
+    image: nginx:1.28.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      temporal-web:
+        condition: service_started
+    ports:
+      - 127.0.0.1:${TEMPORAL_UI_PORT:?Run infra/setup.py}:8080
+    volumes:
+      - ./nginx/temporal-ui.prod.conf:/etc/nginx/conf.d/default.conf:ro
+    secrets:
+      - temporal_ui_htpasswd
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:8080/healthz
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 64000000
+  mongodb:
+    image: mongo:7.0
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: imager
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Run infra/setup.py}
+    volumes:
+      - type: bind
+        source: ${IMAGER_MONGO_DATA_PATH:?Run infra/setup.py}
+        target: /data/db
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - 'quit(db.adminCommand(''ping'').ok ? 0 : 1)'
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 384000000
+  minio:
+    image: imager-temporal/minio:2025-10-15
+    build:
+      context: ..
+      dockerfile: infra/minio.Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    volumes:
+      - type: bind
+        source: ${IMAGER_MINIO_DATA_PATH:?Run infra/setup.py}
+        target: /data
+    ports:
+      - 127.0.0.1:${MINIO_CONSOLE_PORT:?Run infra/setup.py}:9001
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1:9000/minio/health/ready
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    mem_limit: 384000000
+  imager-dispatcher:
+    image: imager-temporal/core:local
+    build: *core-build
+    environment: *core-environment
+    volumes:
+      - *config-volume
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    stop_grace_period: 60s
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - src.presentation.temporal.dispatcher
+    mem_limit: 128000000
+    secrets: *client-tls-secrets
+  imager-worker:
+    image: imager-temporal/core:local
+    build: *core-build
+    environment: *core-environment
+    volumes:
+      - *config-volume
+      - type: bind
+        source: ${IMAGER_WORKER_SCRATCH_PATH:?Run infra/setup.py}
+        target: /tmp
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    stop_grace_period: 60s
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      temporal-namespace:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - src.presentation.temporal.worker
+    mem_limit: 1000000000
+    secrets: *client-tls-secrets
+  telegram-bot:
+    profiles:
+      - bot
+    image: imager-temporal/bot:local
+    build:
+      context: ..
+      dockerfile: telegram_bot/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    init: true
+    environment:
+      API_TOKEN: ${API_TOKEN:-}
+      TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
+      MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
+      IMAGER_CONFIG_FILE: /app/config/runtime.toml
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
+      TMPDIR: /tmp
+    volumes:
+      - *config-volume
+      - type: bind
+        source: ${IMAGER_BOT_SCRATCH_PATH:?Run infra/setup.py}
+        target: /tmp
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    mem_limit: 256000000
+  import-catalog:
+    image: imager-temporal/core:local
+    build: *core-build
+    environment: *core-environment
+    volumes:
+      - *config-volume
+      - ${IMAGER_IMPORT_ROOT:?Run infra/setup.py}:/imports:ro
+    restart: 'no'
+    logging: *logging
+    init: true
+    stop_grace_period: 60s
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    profiles:
+      - tools
+    command:
+      - python
+      - -m
+      - src.presentation.cli.catalog_cli
+      - /imports
+    secrets: *client-tls-secrets
+    mem_limit: 1000000000
+secrets:
+  temporal_ui_htpasswd:
+    file: ${IMAGER_TEMPORAL_UI_AUTH_FILE:?Run infra/setup.py}
+  temporal_ca:
+    file: ${IMAGER_TLS_CA_FILE:?Run production setup}
+  temporal_server_certificate:
+    file: ${IMAGER_TLS_SERVER_CERT_FILE:?Run production setup}
+  temporal_server_private_key:
+    file: ${IMAGER_TLS_SERVER_KEY_FILE:?Run production setup}
+  temporal_client_certificate:
+    file: ${IMAGER_TLS_CLIENT_CERT_FILE:?Run production setup}
+  temporal_client_private_key:
+    file: ${IMAGER_TLS_CLIENT_KEY_FILE:?Run production setup}
+  postgres_certificate:
+    file: ${IMAGER_TLS_POSTGRES_CERT_FILE:?Run production setup}
+  postgres_private_key:
+    file: ${IMAGER_TLS_POSTGRES_KEY_FILE:?Run production setup}

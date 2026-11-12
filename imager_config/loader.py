@@ -110,7 +110,7 @@ def _validate(config):
     from imager_contracts.protocol import (
         BUCKET_PATTERN, COLOR_CHANNELS, GROUP_DIGEST_LENGTH, INSERTION_FORMATS,
         JOB_ID_MAX_LENGTH, JPEG_EXTENSIONS, OBJECT_KEY_MAX_LENGTH, OUTPUT_EXTENSIONS,
-        PERCENT_MAX,
+        PERCENT_MAX, MIN_RSA_KEY_BITS, SQL_IDENTIFIER_PATTERN, SQL_IDENTIFIER_MAX_LENGTH,
     )
 
     zero_allowed = {
@@ -124,6 +124,8 @@ def _validate(config):
         for field in fields(model):
             value = getattr(model, field.name)
             name = f'{path}.{field.name}'.strip('.')
+            if name.startswith('temporal.tls.') and value == '':
+                continue
             if is_dataclass(value):
                 numbers(value, name)
             elif type(value) in (int, float):
@@ -268,6 +270,52 @@ def _validate(config):
         raise ConfigurationError('Deployment ports must fit the TCP port range')
     if config.deployment.temporal_ui_port == config.deployment.minio_console_port:
         raise ConfigurationError('Deployment UI ports must be distinct')
+    tls = config.temporal.tls
+    tls_material = (tls.root_ca_cert, tls.client_cert, tls.client_key, tls.server_name)
+    if tls.enabled and not all(tls_material):
+        raise ConfigurationError('Temporal mTLS requires CA, client certificate, key and server name')
+    if not tls.enabled and any(tls_material):
+        raise ConfigurationError('Enable Temporal TLS when certificate material is configured')
+    production = config.deployment.production
+    _relative_path(production.env_file, 'deployment.production.env_file')
+    if production.env_file == config.paths.compose_env:
+        raise ConfigurationError('Development and production environment files must be distinct')
+    for name in (
+        'data_directory', 'secrets_directory', 'postgres_directory', 'tls_directory',
+        'ca_certificate', 'ca_private_key', 'server_certificate', 'server_private_key',
+        'client_certificate', 'client_private_key', 'postgres_certificate', 'postgres_private_key',
+    ):
+        _basename(getattr(production, name), f'deployment.production.{name}')
+    for name in ('postgres_user', 'postgres_database', 'visibility_database'):
+        value = getattr(production, name)
+        if len(value) > SQL_IDENTIFIER_MAX_LENGTH or not re.fullmatch(SQL_IDENTIFIER_PATTERN, value):
+            raise ConfigurationError(f'Invalid PostgreSQL identifier: deployment.production.{name}')
+    tls_names = [getattr(production, name) for name in (
+        'ca_certificate', 'ca_private_key', 'server_certificate', 'server_private_key',
+        'client_certificate', 'client_private_key', 'postgres_certificate', 'postgres_private_key',
+    )]
+    if len(set(tls_names)) != len(tls_names):
+        raise ConfigurationError('Each production TLS certificate and key needs a distinct filename')
+    if production.postgres_directory in (
+        config.paths.mongo_directory, config.paths.minio_directory, config.paths.temporal_directory,
+        config.paths.worker_scratch_directory, config.paths.bot_scratch_directory,
+        config.paths.client_temp_directory,
+    ):
+        raise ConfigurationError('PostgreSQL must have a dedicated data directory')
+    if production.postgres_database == production.visibility_database:
+        raise ConfigurationError('Temporal history and visibility databases must be distinct')
+    if production.rsa_key_bits < MIN_RSA_KEY_BITS:
+        raise ConfigurationError('Temporal certificates require a secure RSA key size')
+    if production.certificate_days >= production.ca_certificate_days:
+        raise ConfigurationError('The certificate authority must outlive its issued certificates')
+    if production.history_shards & (production.history_shards - 1):
+        raise ConfigurationError('Temporal history_shards must be a power of two')
+    if not (1 <= production.temporal_ui_port <= 65535
+            and 1 <= production.minio_console_port <= 65535):
+        raise ConfigurationError('Production ports must fit the TCP port range')
+    if len({production.temporal_ui_port, production.minio_console_port,
+            config.deployment.temporal_ui_port, config.deployment.minio_console_port}) != 4:
+        raise ConfigurationError('Production and development UI ports must be distinct')
     templates = {
         'source_key_template': {'job_id', 'sha256'},
         'result_key_template': {'job_id', 'execution_token', 'result_filename'},

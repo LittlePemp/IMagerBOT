@@ -2,16 +2,21 @@
 
 Run from /app/imager (or a core checkout with its normal PYTHONPATH):
     python tests/integration/smoke_temporal.py --jobs 2 --result-size 100
+    python tests/integration/smoke_temporal.py --catalog-group dota_icons --cell-size 40 --result-size 120
 
-This is deliberately not a pytest test. It imports only generated images and
-leaves uniquely named smoke jobs/catalogs in Mongo, MinIO and Temporal for UI
-inspection. It does not start services or read/modify a user's image catalog.
+This is deliberately not a pytest test. It uses a synthetic source and either
+imports two generated catalog images or reads an existing --catalog-group.
+Smoke jobs remain in Mongo, MinIO and Temporal for UI inspection. Existing
+catalogs are never changed by this script, and services must already be running.
 """
 import argparse
 import asyncio
 import copy
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -28,11 +33,45 @@ def require(condition, message):
         raise SmokeFailure(message)
 
 
+def verify_output_shape(path, side, max_pixels, timeout):
+    """Decode a result with output ceilings in a fresh, short-lived process.
+
+    The parent and worker retain their stricter source-image decoder settings.
+    Only this child receives the known expected output dimensions/pixel budget.
+    """
+    require(side > 0 and side * side <= max_pixels, 'Output verification exceeds the core pixel budget')
+    environment = os.environ.copy()
+    environment.update({
+        'OPENCV_IO_MAX_IMAGE_WIDTH': str(side),
+        'OPENCV_IO_MAX_IMAGE_HEIGHT': str(side),
+        'OPENCV_IO_MAX_IMAGE_PIXELS': str(side * side),
+    })
+    code = '''
+import json, sys
+sys.path[:] = json.loads(sys.argv[2])
+import cv2
+image = cv2.imread(sys.argv[1], cv2.IMREAD_COLOR)
+print(json.dumps(None if image is None else list(image.shape)))
+'''
+    decoded = subprocess.run(
+        [sys.executable, '-I', '-B', '-c', code, str(path), json.dumps(sys.path)],
+        env=environment, capture_output=True, text=True, timeout=timeout,
+    )
+    require(decoded.returncode == 0, 'Isolated result decoder failed; inspect smoke output and service logs')
+    shape = json.loads(decoded.stdout)
+    require(shape == [side, side, 3], f'Result shape differs from {side}x{side}x3')
+    return shape
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=int, default=1, help='Fan out 1..20 independent jobs.')
     parser.add_argument('--result-size', type=int, default=100,
-                        help='Mosaic cells per side, 1..500; every cell is 8x8 pixels.')
+                        help='Mosaic cells per side, 1..500.')
+    parser.add_argument('--cell-size', type=int, default=8,
+                        help='Pixels per mosaic cell (default: 8); must fit core limits.')
+    parser.add_argument('--catalog-group', default=None,
+                        help='Reuse an existing core catalog group; do not import synthetic catalog images.')
     parser.add_argument('--timeout', type=float, default=120,
                         help='Overall live-test deadline in seconds (default: 120).')
     args = parser.parse_args()
@@ -40,6 +79,10 @@ def parse_args():
         parser.error('--jobs must be between 1 and 20')
     if not 1 <= args.result_size <= 500:
         parser.error('--result-size must be between 1 and 500')
+    if args.cell_size < 1:
+        parser.error('--cell-size must be positive')
+    if args.catalog_group is not None and not args.catalog_group.strip():
+        parser.error('--catalog-group must be nonempty')
     if not 0 < args.timeout <= 3600:
         parser.error('--timeout must be between 0 and 3600 seconds')
     return args
@@ -52,39 +95,51 @@ async def run_smoke(args):
     configure_decoder_limits()
     import cv2
     import numpy as np
-    from temporalio.client import Client
     from imager_contracts import GenerationParameters, JobRequest, ObjectRef
     from imager_config.loader import config
     from settings import settings
     from src.infrastructure.jobs.mongo_jobs import JobConflict
     from src.infrastructure.object_storage.catalog import import_local_catalog
     from src.infrastructure.runtime_bootstrap import create_job_repository, create_object_store
+    from src.infrastructure.temporal_client import connect_temporal_client
 
+    require(args.cell_size <= config.limits.cell_size, 'Cell size exceeds the configured core limit')
+    require(args.result_size ** 2 <= config.limits.cells, 'Mosaic cell count exceeds the core budget')
+    require((args.result_size * args.cell_size) ** 2 <= config.limits.output_pixels,
+            'Requested result dimensions exceed the core pixel budget')
     started = time.monotonic()
     run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '_' + uuid4().hex[:10]
-    group_name = f'smoke_{run_id}'
+    group_name = args.catalog_group or f'smoke_{run_id}'
     repository = None
     async with asyncio.timeout(args.timeout):
         repository = await asyncio.to_thread(create_job_repository)
         store = await asyncio.to_thread(create_object_store)
         database = repository.collection.database
-        client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
+        client = await connect_temporal_client(settings)
 
         with tempfile.TemporaryDirectory(prefix='imager-smoke-') as temporary:
             directory = Path(temporary)
-            catalog_path = directory / 'catalog'
-            catalog_path.mkdir()
-            for name, color in (('red.png', (20, 30, 230)), ('blue.png', (220, 40, 30))):
-                pixels = np.full((20, 20, 3), color, dtype=np.uint8)
-                require(cv2.imwrite(str(catalog_path / name), pixels), 'Synthetic catalog encoder failed')
+            if args.catalog_group is not None:
+                catalog = await asyncio.to_thread(
+                    database[config.mongo.catalog_collection].find_one, {'_id': group_name},
+                )
+                require(catalog is not None, f'Requested catalog group is absent: {group_name}')
+                require(catalog.get('count', 0) > 0, f'Requested catalog group is empty: {group_name}')
+                manifest = ObjectRef.from_dict(catalog['manifest'])
+            else:
+                catalog_path = directory / 'catalog'
+                catalog_path.mkdir()
+                for name, color in (('red.png', (20, 30, 230)), ('blue.png', (220, 40, 30))):
+                    pixels = np.full((20, 20, 3), color, dtype=np.uint8)
+                    require(cv2.imwrite(str(catalog_path / name), pixels), 'Synthetic catalog encoder failed')
 
-            imported = await asyncio.to_thread(
-                import_local_catalog, catalog_path, store, database[config.mongo.catalog_collection],
-                group_name=group_name,
-            )
-            require(len(imported) == 1 and imported[0]['count'] == 2,
-                    'Synthetic catalog did not publish exactly two images')
-            manifest = ObjectRef.from_dict(imported[0]['manifest'])
+                imported = await asyncio.to_thread(
+                    import_local_catalog, catalog_path, store, database[config.mongo.catalog_collection],
+                    group_name=group_name,
+                )
+                require(len(imported) == 1 and imported[0]['count'] == 2,
+                        'Synthetic catalog did not publish exactly two images')
+                manifest = ObjectRef.from_dict(imported[0]['manifest'])
             x = np.tile(np.arange(64, dtype=np.uint8) * 4, (64, 1))
             source_pixels = np.dstack((x, np.flipud(x.T), np.fliplr(x)))
             source_path = directory / config.storage.upload_filename
@@ -101,7 +156,7 @@ async def run_smoke(args):
                 request = JobRequest(
                     job_id=job_id, source=ObjectRef.from_dict(source),
                     parameters=GenerationParameters(
-                        group_name=group_name, cell_size=8, result_size=args.result_size,
+                        group_name=group_name, cell_size=args.cell_size, result_size=args.result_size,
                         insertion_format='crop', alpha_channel=30, noise_level=0,
                     ),
                     catalog_manifest=manifest, seed=index + 1, client_id='smoke',
@@ -156,10 +211,13 @@ async def run_smoke(args):
                 encoded = result_path.read_bytes()
                 require(hashlib.sha256(encoded).hexdigest() == reference['sha256']
                         and len(encoded) == reference['size_bytes'], f'{job_id}: result checksum mismatch')
-                decoded = cv2.imread(str(result_path), cv2.IMREAD_COLOR)
-                side = args.result_size * 8
-                require(decoded is not None and decoded.shape == (side, side, 3),
-                        f'{job_id}: result shape differs from {side}x{side}x3')
+                side = args.result_size * args.cell_size
+                remaining = args.timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError('Smoke deadline reached before result verification')
+                await asyncio.to_thread(
+                    verify_output_shape, result_path, side, config.limits.output_pixels, remaining,
+                )
 
                 # A completed inbox replay and execution replay return the same
                 # canonical result; neither may reset state or increment fence.
@@ -192,6 +250,7 @@ async def run_smoke(args):
                 })
 
             return {'ok': True, 'run_id': run_id, 'group': group_name,
+                    'catalog_reused': args.catalog_group is not None, 'catalog_revision': manifest.sha256,
                     'jobs': summaries, 'elapsed_seconds': round(time.monotonic() - started, 2),
                     'duplicate_reused_result': True, 'payload_conflict_rejected': True,
                     'completion_outbox': 'pending',

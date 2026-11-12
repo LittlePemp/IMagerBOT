@@ -8,10 +8,11 @@ from pathlib import Path
 from threading import RLock
 
 from imager_config.loader import config
+from imager_contracts import ObjectRef
 from imager_contracts.protocol import (
     BINARY_CONTENT_TYPE, CATALOG_NORMALIZATION, COLOR_CHANNEL_MAX, COLOR_CHANNELS,
     GROUP_DIGEST_LENGTH, GROUP_NAME_MAX_LENGTH, JPEG_CONTENT_TYPE, JPEG_EXTENSIONS,
-    PNG_CONTENT_TYPE, SCHEMA_VERSION,
+    JSON_CONTENT_TYPE, PNG_CONTENT_TYPE, SCHEMA_VERSION,
 )
 from src.shared_kernel.resource_limits import configure_decoder_limits
 
@@ -166,8 +167,7 @@ class MinioCatalogProvider:
             return self._catalog
 
 
-def import_local_catalog(directory, store, groups_collection, group_name=None):
-    """Explicit one-off import. Local files are read, never moved or deleted."""
+def _local_groups(directory, group_name):
     base = Path(directory).resolve()
     if not base.is_dir():
         raise ValueError('Catalog import directory does not exist')
@@ -175,58 +175,110 @@ def import_local_catalog(directory, store, groups_collection, group_name=None):
         groups = [(validate_group_name(group_name), base)]
     else:
         groups = [(validate_group_name(path.name), path)
-                  for path in sorted(base.iterdir()) if path.is_dir()]
-    store.ensure_bucket()
-    report = []
-    extensions = config.catalog.allowed_extensions
-    for name, group_path in groups:
-        images, seen_hashes = [], set()
-        for path in sorted(group_path.iterdir()):
-            if not path.is_file() or path.suffix.lower() not in extensions:
-                continue
-            if path.stat().st_size > config.limits.source_file_bytes:
-                raise ValueError(f'Catalog image exceeds {config.limits.source_file_bytes} bytes: {path.name}')
-            require_memory(config.memory.decode_reserve_bytes)
-            decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-            validation = ImageService.validate_image(decoded)
-            if not validation:
-                raise ValueError(f'{path.name}: {validation.error}')
-            normalized = ImageService.normalize_image(decoded)
-            if not normalized:
-                raise ValueError(f'{path.name}: {normalized.error}')
-            digest = file_sha256(path)
-            if digest in seen_hashes:
-                continue
-            seen_hashes.add(digest)
-            color = ImageService.average_color(normalized.value)
-            if not color:
-                raise ValueError(str(color.error))
-            extension = path.suffix.lower()
-            key = config.storage.catalog_image_key_template.format(sha256=digest, extension=extension)
-            mime = JPEG_CONTENT_TYPE if extension in JPEG_EXTENSIONS else (
-                PNG_CONTENT_TYPE if extension == '.png' else BINARY_CONTENT_TYPE
-            )
-            reference = store.upload_file(path, key, mime)
-            height, width = normalized.value.shape[:2]
-            images.append({'object': reference, 'color': list(color.value),
-                           'width': width, 'height': height})
-            if len(images) > config.catalog.max_images:
-                raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
-        if not images:
-            raise ValueError(f'Catalog group {name} contains no supported images')
-        manifest = dict(schema_version=SCHEMA_VERSION, group_name=name,
-                        normalization=CATALOG_NORMALIZATION, images=images)
-        encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
-                             ensure_ascii=False).encode('utf-8')
-        revision = hashlib.sha256(encoded).hexdigest()
-        # The group is metadata; content-addressed objects avoid unsafe names.
-        group_key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:GROUP_DIGEST_LENGTH]
-        manifest_key = config.storage.catalog_manifest_key_template.format(
-            group_id=group_key, sha256=revision,
+                  for path in sorted(base.iterdir(), key=lambda item: item.name) if path.is_dir()]
+    if not groups:
+        raise ValueError('Catalog root contains no group directories; use --group-name for one image directory')
+    return groups
+
+
+def _local_group_plan(name, group_path, bucket):
+    """Hash/validate a group with one decoded image resident at a time."""
+    images, sources, seen_hashes = [], [], set()
+    source_files = source_bytes = image_bytes = cache_bytes = 0
+    widths, heights = [], []
+    for path in sorted(group_path.iterdir(), key=lambda item: item.name):
+        if not path.is_file() or path.suffix.lower() not in config.catalog.allowed_extensions:
+            continue
+        size = path.stat().st_size
+        source_files += 1
+        source_bytes += size
+        if not 0 < size <= config.limits.source_file_bytes:
+            raise ValueError(f'{path.name}: encoded image size must fit {config.limits.source_file_bytes} bytes')
+        digest = file_sha256(path)
+        if digest in seen_hashes:
+            continue
+        if len(images) >= config.catalog.max_images:
+            raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
+        require_memory(config.memory.decode_reserve_bytes)
+        decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        validation = ImageService.validate_image(decoded)
+        if not validation:
+            raise ValueError(f'{path.name}: {validation.error}')
+        normalized = ImageService.normalize_image(decoded)
+        if not normalized:
+            raise ValueError(f'{path.name}: {normalized.error}')
+        color = ImageService.average_color(normalized.value)
+        if not color:
+            raise ValueError(f'{path.name}: {color.error}')
+        extension = path.suffix.lower()
+        key = config.storage.catalog_image_key_template.format(sha256=digest, extension=extension)
+        mime = JPEG_CONTENT_TYPE if extension in JPEG_EXTENSIONS else (
+            PNG_CONTENT_TYPE if extension == '.png' else BINARY_CONTENT_TYPE
         )
-        manifest_ref = store.put_json(manifest, manifest_key)
-        document = dict(group=name, name=name, count=len(images), revision=revision,
-                        manifest=manifest_ref, updated_at=datetime.now(timezone.utc))
-        groups_collection.update_one({'_id': name}, {'$set': document}, upsert=True)
-        report.append(document)
+        reference = ObjectRef(bucket, key, digest, size, mime).to_dict()
+        height, width = normalized.value.shape[:2]
+        images.append({'object': reference, 'color': list(color.value),
+                       'width': width, 'height': height})
+        sources.append((path, reference))
+        widths.append(width)
+        heights.append(height)
+        image_bytes += size
+        cache_bytes += normalized.value.nbytes
+        seen_hashes.add(digest)
+        del decoded, normalized, validation
+    if not images:
+        raise ValueError(f'Catalog group {name} contains no supported images')
+    manifest = dict(schema_version=SCHEMA_VERSION, group_name=name,
+                    normalization=CATALOG_NORMALIZATION, images=images)
+    encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
+                         ensure_ascii=False).encode('utf-8')
+    if len(encoded) > config.catalog.max_manifest_bytes:
+        raise ValueError(f'Catalog manifest exceeds {config.catalog.max_manifest_bytes} bytes')
+    revision = hashlib.sha256(encoded).hexdigest()
+    group_id = hashlib.sha256(name.encode('utf-8')).hexdigest()[:GROUP_DIGEST_LENGTH]
+    manifest_key = config.storage.catalog_manifest_key_template.format(group_id=group_id, sha256=revision)
+    manifest_ref = ObjectRef(bucket, manifest_key, revision, len(encoded), JSON_CONTENT_TYPE).to_dict()
+    report = dict(
+        group=name, name=name, count=len(images), revision=revision, manifest=manifest_ref,
+        source_files=source_files, duplicate_files=source_files - len(images),
+        source_bytes=source_bytes, unique_image_bytes=image_bytes, manifest_bytes=len(encoded),
+        additional_payload_bytes_upper_bound=image_bytes + len(encoded),
+        normalized_cache_bytes=cache_bytes,
+        width_min=min(widths), width_max=max(widths), height_min=min(heights), height_max=max(heights),
+    )
+    return report, manifest, sources
+
+
+def preview_local_catalog(directory, group_name=None, bucket=None):
+    """Offline preflight: read originals; never create buckets or update Mongo."""
+    bucket = config.storage.bucket if bucket is None else bucket
+    return [_local_group_plan(name, path, bucket)[0]
+            for name, path in _local_groups(directory, group_name)]
+
+
+def import_local_catalog(directory, store, groups_collection, group_name=None):
+    """Publish validated immutable objects, then atomically replace each group.
+
+    Repeated imports reuse object keys and manifest revisions. Originals are
+    read only, and objects absent from a newer revision are never deleted here.
+    Capacity reports count payload bytes before reuse; MinIO filesystem metadata
+    and unrelated existing objects are outside this conservative estimate.
+    """
+    report = []
+    for name, group_path in _local_groups(directory, group_name):
+        document, manifest, sources = _local_group_plan(name, group_path, store.bucket)
+        store.ensure_bucket()
+        for path, expected in sources:
+            reference = store.upload_file(path, expected['key'], expected['content_type'])
+            if reference != expected:
+                raise ValueError(f'{path.name}: source changed while importing; catalog was not published')
+        manifest_ref = store.put_json(manifest, document['manifest']['key'])
+        if manifest_ref != document['manifest']:
+            raise ValueError('Published manifest does not match the validated import plan')
+        published = dict(
+            group=name, name=name, count=document['count'], revision=document['revision'],
+            manifest=manifest_ref, updated_at=datetime.now(timezone.utc),
+        )
+        groups_collection.update_one({'_id': name}, {'$set': published}, upsert=True)
+        report.append({**document, 'updated_at': published['updated_at']})
     return report

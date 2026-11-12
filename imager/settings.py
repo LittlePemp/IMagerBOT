@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     temporal_task_queue: str = config.temporal.task_queue
     temporal_dispatch_poll_seconds: float = Field(default=config.temporal.dispatcher.poll_seconds, gt=0, le=60)
     temporal_worker_identity: str = ''
+    temporal_tls_enabled: bool = config.temporal.tls.enabled
+    temporal_tls_root_ca_cert: str = config.temporal.tls.root_ca_cert
+    temporal_tls_client_cert: str = config.temporal.tls.client_cert
+    temporal_tls_client_key: str = config.temporal.tls.client_key
+    temporal_tls_server_name: str = config.temporal.tls.server_name
     job_execution_lease_seconds: int = Field(default=config.jobs.execution_lease_seconds, ge=30, le=600)
     minio_endpoint: str = config.storage.endpoint
     minio_access_key: SecretStr = SecretStr('')
@@ -79,6 +84,16 @@ class Settings(BaseSettings):
             raise ValueError('Aspect ratio limits must be finite, positive and ordered')
         if self.generated_image_extension.lower().lstrip('.') not in OUTPUT_EXTENSIONS:
             raise ValueError('Output format must be jpg, jpeg or png')
+        return self
+
+    @model_validator(mode='after')
+    def validate_temporal_tls(self):
+        material = (self.temporal_tls_root_ca_cert, self.temporal_tls_client_cert,
+                    self.temporal_tls_client_key, self.temporal_tls_server_name)
+        if self.temporal_tls_enabled and not all(material):
+            raise ValueError('Temporal mTLS requires CA, client certificate, key and server name')
+        if not self.temporal_tls_enabled and any(material):
+            raise ValueError('Enable Temporal TLS when certificate material is configured')
         return self
 
     def create_directories(self) -> None:

@@ -60,12 +60,18 @@ def dotenv_literal(value):
     return "'" + text.replace("'", "\\'") + "'"
 
 
-def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, rotate_ui=False):
+def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, rotate_ui=False,
+            production=False, openssl=None):
     project_root = Path(project_root).resolve()
-    env_path = project_root / config.paths.compose_env
+    production_config = config.deployment.production if production else None
+    env_path = project_root / (production_config.env_file if production else config.paths.compose_env)
     values = parse_env(env_path)
+    development_env = project_root / config.paths.compose_env
+    development_values = parse_env(development_env) if production else {}
     existing_bot = parse_env(project_root / config.paths.legacy_bot_env)
     secret_root = project_root / config.paths.secrets_root
+    if production:
+        secret_root /= production_config.secrets_directory
     secret_root.mkdir(parents=True, exist_ok=True)
     credential_path = secret_root / config.paths.ui_credentials
     auth_path = secret_root / config.paths.ui_password_hash
@@ -80,10 +86,30 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
                 # of the directory from which setup was invoked.
                 data_root = env_path.parent / data_root
         else:
-            data_root = default_data_root(project_root)
+            if production and development_values.get('IMAGER_DATA_ROOT'):
+                base = Path(development_values['IMAGER_DATA_ROOT'])
+                if not base.is_absolute():
+                    base = development_env.parent / base
+            else:
+                base = default_data_root(project_root)
+            data_root = base / production_config.data_directory if production else base
     data_root = Path(data_root).resolve()
     if data_root == Path(data_root.anchor):
         raise ValueError('Use a dedicated project data directory, not a drive/filesystem root')
+    if production:
+        development_root = Path(development_values.get('IMAGER_DATA_ROOT') or default_data_root(project_root))
+        if not development_root.is_absolute():
+            development_root = development_env.parent / development_root
+        development_root = development_root.resolve()
+        role_directories = (
+            config.paths.mongo_directory, config.paths.minio_directory,
+            config.paths.temporal_directory, config.paths.worker_scratch_directory,
+            config.paths.bot_scratch_directory, config.paths.client_temp_directory,
+        )
+        for old in (development_root / name for name in role_directories):
+            for new in (data_root / name for name in (*role_directories, production_config.postgres_directory)):
+                if old.is_relative_to(new) or new.is_relative_to(old):
+                    raise ValueError('Production data must not overlap development service directories')
     for directory in (
         config.paths.mongo_directory, config.paths.minio_directory, config.paths.temporal_directory,
         config.paths.worker_scratch_directory, config.paths.bot_scratch_directory,
@@ -118,11 +144,13 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
         'MONGO_PASSWORD': configured_secret('MONGO_PASSWORD', config.auth.mongo_password_random_bytes),
         'MINIO_ACCESS_KEY': configured_secret('MINIO_ACCESS_KEY', config.auth.minio_access_random_bytes),
         'MINIO_SECRET_KEY': configured_secret('MINIO_SECRET_KEY', config.auth.minio_secret_random_bytes),
-        'TEMPORAL_UI_PORT': values.get('TEMPORAL_UI_PORT') or str(config.deployment.temporal_ui_port),
-        'MINIO_CONSOLE_PORT': values.get('MINIO_CONSOLE_PORT') or str(config.deployment.minio_console_port),
+        'TEMPORAL_UI_PORT': values.get('TEMPORAL_UI_PORT') or str(
+            production_config.temporal_ui_port if production else config.deployment.temporal_ui_port),
+        'MINIO_CONSOLE_PORT': values.get('MINIO_CONSOLE_PORT') or str(
+            production_config.minio_console_port if production else config.deployment.minio_console_port),
         'API_TOKEN': values.get('API_TOKEN') or existing_bot.get('API_TOKEN', existing_bot.get('api_token', '')),
         'TELEGRAM_ADMIN_IDS': values.get('TELEGRAM_ADMIN_IDS') or existing_bot.get('TELEGRAM_ADMIN_IDS', existing_bot.get('telegram_admin_ids', '')),
-        'IMAGER_IMPORT_ROOT': values.get('IMAGER_IMPORT_ROOT') or (project_root / 'imager' / config.paths.image_groups).as_posix(),
+        'IMAGER_IMPORT_ROOT': values.get('IMAGER_IMPORT_ROOT') or (project_root / config.paths.image_groups).as_posix(),
         'IMAGER_MONGO_DATA_PATH': (data_root / config.paths.mongo_directory).as_posix(),
         'IMAGER_MINIO_DATA_PATH': (data_root / config.paths.minio_directory).as_posix(),
         'IMAGER_TEMPORAL_DATA_PATH': (data_root / config.paths.temporal_directory).as_posix(),
@@ -142,6 +170,29 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
     else:
         selected_config = DEFAULT_CONFIG_PATH
     values['IMAGER_CONFIG_SOURCE'] = selected_config.as_posix()
+    if production:
+        from infra.certificates import ensure_certificates
+        tls_root = ensure_certificates(secret_root / production_config.tls_directory, production_config, openssl)
+        postgres_root = data_root / production_config.postgres_directory
+        postgres_root.mkdir(parents=True, exist_ok=True)
+        values.update({
+            'POSTGRES_PASSWORD': configured_secret('POSTGRES_PASSWORD', production_config.postgres_password_random_bytes),
+            'TEMPORAL_POSTGRES_PASSWORD': configured_secret('TEMPORAL_POSTGRES_PASSWORD', production_config.postgres_password_random_bytes),
+            'TEMPORAL_POSTGRES_USER': production_config.postgres_user,
+            'TEMPORAL_DATABASE': production_config.postgres_database,
+            'TEMPORAL_VISIBILITY_DATABASE': production_config.visibility_database,
+            'IMAGER_POSTGRES_DATA_PATH': postgres_root.as_posix(),
+            'IMAGER_TLS_CA_FILE': (tls_root / production_config.ca_certificate).as_posix(),
+            'IMAGER_TLS_SERVER_CERT_FILE': (tls_root / production_config.server_certificate).as_posix(),
+            'IMAGER_TLS_SERVER_KEY_FILE': (tls_root / production_config.server_private_key).as_posix(),
+            'IMAGER_TLS_CLIENT_CERT_FILE': (tls_root / production_config.client_certificate).as_posix(),
+            'IMAGER_TLS_CLIENT_KEY_FILE': (tls_root / production_config.client_private_key).as_posix(),
+            'IMAGER_TLS_POSTGRES_CERT_FILE': (tls_root / production_config.postgres_certificate).as_posix(),
+            'IMAGER_TLS_POSTGRES_KEY_FILE': (tls_root / production_config.postgres_private_key).as_posix(),
+            'TEMPORAL_HISTORY_SHARDS': str(production_config.history_shards),
+            'IMAGER_RUNTIME_UID': str(os.getuid() if hasattr(os, 'getuid') else 1000),
+            'IMAGER_RUNTIME_GID': str(os.getgid() if hasattr(os, 'getgid') else 1000),
+        })
     env_path.parent.mkdir(parents=True, exist_ok=True)
     # Single quotes preserve spaces and prevent Compose expansion of secret $.
     env_path.write_text(
@@ -173,11 +224,14 @@ def main():
     parser.add_argument('--ui-user')
     parser.add_argument('--prompt-ui-password', action='store_true')
     parser.add_argument('--rotate-ui', action='store_true')
+    parser.add_argument('--production', action='store_true')
+    parser.add_argument('--openssl', help='Existing OpenSSL executable for production TLS certificates')
     args = parser.parse_args()
     password = getpass.getpass(f'Temporal UI password (at least {config.auth.ui_password_min_length} characters): ') if args.prompt_ui_password else None
     result = prepare(
         data_root=args.data_root, ui_user=args.ui_user,
         ui_password=password, rotate_ui=args.rotate_ui,
+        production=args.production, openssl=args.openssl,
     )
     print(f'Compose environment: {result["env"]}')
     print(f'Credentials saved locally: {result["credentials"]}')

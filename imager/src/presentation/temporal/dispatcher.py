@@ -3,13 +3,13 @@ import asyncio
 import signal
 import time
 
-from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository
+from src.infrastructure.temporal_client import connect_temporal_client
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -108,9 +108,7 @@ async def main():
             pass
     while not stop.is_set():
         try:
-            client = await Client.connect(
-                settings.temporal_address, namespace=settings.temporal_namespace,
-            )
+            client = await connect_temporal_client(settings)
             last_reconcile = 0
             while not stop.is_set():
                 if time.monotonic() - last_reconcile >= config.temporal.dispatcher.reconcile_seconds:

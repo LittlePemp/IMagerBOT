@@ -113,6 +113,13 @@ cached_workflows = 20
 disable_eager_execution = true
 shutdown_seconds = 30.0
 
+[temporal.tls]
+enabled = false
+root_ca_cert = ""
+client_cert = ""
+client_key = ""
+server_name = ""
+
 [temporal.dispatcher]
 poll_seconds = 1.0
 reconnect_seconds = 3.0
@@ -209,3 +216,31 @@ retained_archives = 3
 [deployment]
 temporal_ui_port = 8088
 minio_console_port = 9001
+
+[deployment.production]
+env_file = "infra/.env.prod"
+data_directory = "prod"
+secrets_directory = "prod"
+postgres_directory = "postgres"
+postgres_user = "imager_temporal"
+postgres_database = "temporal"
+visibility_database = "temporal_visibility"
+postgres_password_random_bytes = 30
+tls_directory = "tls"
+ca_certificate = "ca.crt"
+ca_private_key = "ca.key"
+server_certificate = "server.crt"
+server_private_key = "server.key"
+client_certificate = "client.crt"
+client_private_key = "client.key"
+postgres_certificate = "postgres.crt"
+postgres_private_key = "postgres.key"
+certificate_days = 365
+ca_certificate_days = 3650
+rsa_key_bits = 3072
+temporal_ui_port = 18088
+minio_console_port = 19001
+history_shards = 128
+namespace_retention_days = 7
+namespace_startup_attempts = 60
+namespace_retry_seconds = 2.0

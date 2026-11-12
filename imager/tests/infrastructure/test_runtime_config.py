@@ -235,6 +235,23 @@ assert 'imager_config.loader' not in sys.modules
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_production_configuration_preserves_isolation_and_tls_identity(self):
+        for content in (
+            '[deployment.production]\nenv_file="infra/.env"',
+            '[deployment.production]\npostgres_directory="mongo"',
+            '[deployment.production]\nclient_certificate="client.key"',
+            '[deployment.production]\npostgres_user="invalid; DROP ROLE postgres"',
+            '[deployment.production]\nvisibility_database="temporal"',
+            '[deployment.production]\nrsa_key_bits=1024',
+            '[deployment.production]\ncertificate_days=3650',
+            '[deployment.production]\nhistory_shards=127',
+            '[deployment.production]\ntemporal_ui_port=8088',
+            '[temporal.tls]\nenabled=true',
+            '[temporal.tls]\nclient_key="configured-without-tls.key"',
+        ):
+            with self.subTest(content=content):
+                self.reject(content)
+
 
 if __name__ == '__main__':
     unittest.main()

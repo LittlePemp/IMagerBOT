@@ -173,6 +173,7 @@ files/
 # Project-local container data and generated credentials.
 .local/
 infra/.env
+infra/.env.prod
 infra/secrets/
 
 # Machine-local launch scripts and runtime overrides.

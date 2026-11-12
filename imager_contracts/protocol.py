@@ -28,6 +28,11 @@ LOCAL_PATH_MAX_LENGTH = 4096
 OUTPUT_NAME_MAX_LENGTH = 200
 JSON_EXTENSION = '.json'
 TEMPORARY_FILE_SUFFIX = '.tmp'
+# Exception locals can contain passwords, certificate keys and image payloads.
+LOG_EXCEPTION_LOCALS = False
+MIN_RSA_KEY_BITS = 2048
+SQL_IDENTIFIER_PATTERN = r'[A-Za-z_][A-Za-z0-9_]*'
+SQL_IDENTIFIER_MAX_LENGTH = 63
 TELEGRAM_JOB_ID_NAMESPACE = 'imager:telegram:'
 HISTORY_ID_NAMESPACE = 'imager-history:'
 HISTORY_ID_HEX_LENGTH = 24

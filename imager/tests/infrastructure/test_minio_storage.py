@@ -12,7 +12,9 @@ import numpy as np
 from imager_config.loader import load_config
 from imager_contracts.protocol import JPEG_CONTENT_TYPE, SEED_UPPER_BOUND
 from src.application.image_builder.services.object_render import ObjectRenderExecutor, RenderRejected
-from src.infrastructure.object_storage.catalog import MinioCatalogProvider, import_local_catalog
+from src.infrastructure.object_storage.catalog import (
+    MinioCatalogProvider, import_local_catalog, preview_local_catalog,
+)
 from src.infrastructure.object_storage.minio_store import (
     MinioObjectStore, ObjectIntegrityError, ObjectStoreError,
 )
@@ -148,6 +150,54 @@ class TestMinioStorage(unittest.TestCase):
         second = import_local_catalog(self.root, self.store, groups)
         self.assertEqual(second[0]['revision'], report[0]['revision'])
         self.assertEqual(self.client.upload_count, uploads)
+
+    def test_catalog_preview_is_offline_and_matches_unique_import_capacity(self):
+        group = self.root / 'cats'
+        group.mkdir()
+        path = group / 'one.png'
+        cv2.imwrite(str(path), np.full((20, 30, 3), (30, 90, 180), dtype=np.uint8))
+        original = path.read_bytes()
+        (group / 'duplicate.png').write_bytes(original)
+        preview = preview_local_catalog(self.root)
+        self.assertEqual(self.client.upload_count, 0)
+        self.assertEqual(self.client.get_count, 0)
+        self.assertEqual(preview[0]['source_files'], 2)
+        self.assertEqual(preview[0]['count'], 1)
+        self.assertEqual(preview[0]['duplicate_files'], 1)
+        self.assertEqual(preview[0]['source_bytes'], len(original) * 2)
+        self.assertEqual(preview[0]['unique_image_bytes'], len(original))
+        self.assertEqual(preview[0]['normalized_cache_bytes'], 20 * 30 * 3)
+        self.assertEqual((preview[0]['width_min'], preview[0]['height_max']), (30, 20))
+        imported = import_local_catalog(self.root, self.store, Groups())
+        self.assertEqual(preview[0]['revision'], imported[0]['revision'])
+        self.assertEqual(preview[0]['manifest'], imported[0]['manifest'])
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_bad_local_image_is_rejected_before_bucket_or_registry_mutation(self):
+        group = self.root / 'cats'
+        group.mkdir()
+        (group / 'broken.png').write_bytes(b'not an encoded image')
+        groups = Groups()
+        with patch.object(self.store, 'ensure_bucket') as ensure_bucket:
+            with self.assertRaises(ValueError):
+                import_local_catalog(self.root, self.store, groups)
+        ensure_bucket.assert_not_called()
+        self.assertEqual(groups.documents, {})
+        self.assertEqual(self.client.upload_count, 0)
+
+    def test_empty_catalog_root_does_not_report_a_successful_import(self):
+        with self.assertRaises(ValueError):
+            preview_local_catalog(self.root)
+
+    def test_manifest_order_is_identical_for_windows_and_linux_filename_case(self):
+        group = self.root / 'cats'
+        group.mkdir()
+        for name, color in (('a.png', (5, 10, 15)), ('Z.png', (50, 60, 70))):
+            cv2.imwrite(str(group / name), np.full((20, 20, 3), color, dtype=np.uint8))
+        report = import_local_catalog(self.root, self.store, Groups())
+        manifest = self.store.read_json(report[0]['manifest'])
+        self.assertEqual([image['color'] for image in manifest['images']],
+                         [[50, 60, 70], [5, 10, 15]])
 
     def prepare_catalog(self):
         group = self.root / 'cats'

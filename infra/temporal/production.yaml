@@ -1,0 +1,105 @@
+# enable-template
+# Temporal 1.32 uses the server's built-in Sprig renderer, not dockerize.
+log:
+  stdout: true
+  level: info
+persistence:
+  numHistoryShards: {{ env "TEMPORAL_HISTORY_SHARDS" }}
+  defaultStore: default
+  visibilityStore: visibility
+  datastores:
+    default:
+      sql:
+        pluginName: postgres12
+        databaseName: {{ env "TEMPORAL_DATABASE" | quote }}
+        connectAddr: postgres:5432
+        connectProtocol: tcp
+        user: {{ env "TEMPORAL_POSTGRES_USER" | quote }}
+        password: {{ env "TEMPORAL_POSTGRES_PASSWORD" | quote }}
+        maxConns: 10
+        maxIdleConns: 5
+        maxConnLifetime: 1h
+        tls:
+          enabled: true
+          caFile: /run/secrets/temporal_ca
+          serverName: postgres
+          enableHostVerification: true
+    visibility:
+      sql:
+        pluginName: postgres12
+        databaseName: {{ env "TEMPORAL_VISIBILITY_DATABASE" | quote }}
+        connectAddr: postgres:5432
+        connectProtocol: tcp
+        user: {{ env "TEMPORAL_POSTGRES_USER" | quote }}
+        password: {{ env "TEMPORAL_POSTGRES_PASSWORD" | quote }}
+        maxConns: 5
+        maxIdleConns: 2
+        maxConnLifetime: 1h
+        tls:
+          enabled: true
+          caFile: /run/secrets/temporal_ca
+          serverName: postgres
+          enableHostVerification: true
+global:
+  membership:
+    maxJoinDuration: 30s
+    broadcastAddress: {{ env "TEMPORAL_BROADCAST_ADDRESS" | quote }}
+  tls:
+    refreshInterval: 1m
+    internode:
+      server:
+        certFile: /run/secrets/temporal_server_certificate
+        keyFile: /run/secrets/temporal_server_private_key
+        requireClientAuth: true
+        clientCaFiles: [/run/secrets/temporal_ca]
+      client:
+        serverName: temporal
+        rootCaFiles: [/run/secrets/temporal_ca]
+    frontend:
+      server:
+        certFile: /run/secrets/temporal_server_certificate
+        keyFile: /run/secrets/temporal_server_private_key
+        requireClientAuth: true
+        clientCaFiles: [/run/secrets/temporal_ca]
+      client:
+        serverName: temporal
+        rootCaFiles: [/run/secrets/temporal_ca]
+services:
+  frontend:
+    rpc:
+      grpcPort: 7233
+      membershipPort: 6933
+      bindOnIP: 0.0.0.0
+  history:
+    rpc:
+      grpcPort: 7234
+      membershipPort: 6934
+      bindOnIP: 0.0.0.0
+  matching:
+    rpc:
+      grpcPort: 7235
+      membershipPort: 6935
+      bindOnIP: 0.0.0.0
+  worker:
+    rpc:
+      grpcPort: 7239
+      membershipPort: 6939
+      bindOnIP: 0.0.0.0
+clusterMetadata:
+  enableGlobalNamespace: false
+  failoverVersionIncrement: 10
+  masterClusterName: active
+  currentClusterName: active
+  clusterInformation:
+    active:
+      enabled: true
+      initialFailoverVersion: 1
+      rpcName: frontend
+      rpcAddress: temporal:7233
+dcRedirectionPolicy:
+  policy: noop
+archival:
+  history:
+    state: disabled
+  visibility:
+    state: disabled
