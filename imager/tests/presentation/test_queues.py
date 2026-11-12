@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from imager_config.loader import config
+from imager_contracts.protocol import JSON_EXTENSION, TEMPORARY_FILE_SUFFIX
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +28,8 @@ def load_module(relative, collaborators):
     path = ROOT / relative
     syntax = ast.parse(path.read_text(encoding='utf-8'))
     syntax.body = [node for node in syntax.body if not isinstance(node, (ast.Import, ast.ImportFrom))]
-    namespace = dict(collaborators)
+    namespace = {'config': config, 'JSON_EXTENSION': JSON_EXTENSION,
+                 'TEMPORARY_FILE_SUFFIX': TEMPORARY_FILE_SUFFIX, **collaborators}
     exec(compile(syntax, str(path), 'exec'), namespace)
     return namespace
 

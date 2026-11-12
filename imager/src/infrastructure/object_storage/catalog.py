@@ -1,7 +1,5 @@
 import hashlib
 import json
-import os
-import re
 import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -9,6 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 
+from imager_config.loader import config
+from imager_contracts.protocol import (
+    BINARY_CONTENT_TYPE, CATALOG_NORMALIZATION, COLOR_CHANNEL_MAX, COLOR_CHANNELS,
+    GROUP_DIGEST_LENGTH, GROUP_NAME_MAX_LENGTH, JPEG_CONTENT_TYPE, JPEG_EXTENSIONS,
+    PNG_CONTENT_TYPE, SCHEMA_VERSION,
+)
 from src.shared_kernel.resource_limits import configure_decoder_limits
 
 configure_decoder_limits()
@@ -18,17 +22,14 @@ import numpy as np
 from scipy.spatial import KDTree
 from src.domain.image_builder.services.image_service import ImageService
 from src.shared_kernel.loggers import db_logger
-from src.shared_kernel.resource_limits import (
-    CACHE_LIMIT_BYTES, MEMORY_HEADROOM_BYTES, MEMORY_LIMIT_BYTES,
-    current_rss_bytes, require_memory,
-)
+from src.shared_kernel.resource_limits import current_rss_bytes, require_memory
 from src.shared_kernel.result import Result
 
 from .minio_store import file_sha256, reference_dict
 
 
 def validate_group_name(value):
-    if (not isinstance(value, str) or not value.strip() or len(value) > 128
+    if (not isinstance(value, str) or not value.strip() or len(value) > GROUP_NAME_MAX_LENGTH
             or value in ('.', '..') or '/' in value or '\\' in value
             or '\x00' in value):
         raise ValueError('Catalog group must be a non-empty name without path separators')
@@ -51,28 +52,27 @@ class ManifestCatalog:
     """One immutable catalog revision, with a lazy bounded cache of originals."""
 
     def __init__(self, store, manifest_ref, group_name):
-        require_memory(64_000_000)
+        require_memory(config.memory.manifest_reserve_bytes)
         manifest = store.read_json(manifest_ref)
-        if (not isinstance(manifest, dict) or manifest.get('schema_version') != 1
+        if (not isinstance(manifest, dict) or manifest.get('schema_version') != SCHEMA_VERSION
                 or manifest.get('group_name') != group_name
-                or manifest.get('normalization') != 'opencv-uint8-bgr-v1'):
+                or manifest.get('normalization') != CATALOG_NORMALIZATION):
             raise ValueError('Unsupported or mismatched catalog manifest')
         images = manifest.get('images')
-        if not isinstance(images, list) or not 1 <= len(images) <= 100_000:
-            raise ValueError('Catalog must contain between 1 and 100000 images')
+        if not isinstance(images, list) or not 1 <= len(images) <= config.catalog.max_images:
+            raise ValueError(f'Catalog must contain between 1 and {config.catalog.max_images} images')
         cells, identities = [], set()
         for index, image in enumerate(images):
-            if index % 128 == 0:
-                require_memory(32_000_000)
+            if index % config.catalog.validation_interval == 0:
+                require_memory(config.memory.catalog_check_reserve_bytes)
             if not isinstance(image, dict):
                 raise ValueError('Invalid catalog entry')
-            ref = store.validate_reference(image.get('object'), 64_000_000)
+            ref = store.validate_reference(image.get('object'), config.limits.source_file_bytes)
             color = image.get('color')
-            if (not isinstance(color, list) or len(color) != 3
-                    or any(type(value) is not int or not 0 <= value <= 255 for value in color)):
+            if (not isinstance(color, list) or len(color) != COLOR_CHANNELS
+                    or any(type(value) is not int or not 0 <= value <= COLOR_CHANNEL_MAX
+                           for value in color)):
                 raise ValueError('Catalog color must be three integer BGR channels')
-            if not ref['key'].startswith('catalog/images/'):
-                raise ValueError('Catalog image reference must use the catalog image prefix')
             identity = (ref['bucket'], ref['key'], ref['sha256'])
             if identity in identities:
                 continue
@@ -115,13 +115,15 @@ class ManifestCatalog:
                 self._images.move_to_end(key)
                 return Result.Success(image)
             try:
-                while (self._images and current_rss_bytes() + 256_000_000
-                       + MEMORY_HEADROOM_BYTES > MEMORY_LIMIT_BYTES):
-                    self.trim_image_cache(max(0, self._cache_bytes - 32_000_000))
-                require_memory(256_000_000)
-                with tempfile.TemporaryDirectory(prefix='imager-cell-') as directory:
+                while (self._images and current_rss_bytes() + config.memory.decode_reserve_bytes
+                       + config.limits.memory_headroom_bytes > config.limits.memory_bytes):
+                    self.trim_image_cache(max(
+                        0, self._cache_bytes - config.memory.cache_eviction_step_bytes,
+                    ))
+                require_memory(config.memory.decode_reserve_bytes)
+                with tempfile.TemporaryDirectory(prefix=config.storage.cell_temp_prefix) as directory:
                     path = self.store.download_file(
-                        metadata.object_ref, Path(directory) / 'original.bin',
+                        metadata.object_ref, Path(directory) / config.storage.cell_filename,
                     )
                     decoded = cv2.imread(path, cv2.IMREAD_UNCHANGED)
                     validation = ImageService.validate_image(decoded)
@@ -131,8 +133,8 @@ class ManifestCatalog:
                     if not normalized:
                         return normalized
                     image = normalized.value
-                if image.nbytes <= CACHE_LIMIT_BYTES:
-                    self.trim_image_cache(CACHE_LIMIT_BYTES - image.nbytes)
+                if image.nbytes <= config.limits.original_cache_bytes:
+                    self.trim_image_cache(config.limits.original_cache_bytes - image.nbytes)
                     self._images[key] = image
                     self._cache_bytes += image.nbytes
                 return Result.Success(image)
@@ -176,15 +178,15 @@ def import_local_catalog(directory, store, groups_collection, group_name=None):
                   for path in sorted(base.iterdir()) if path.is_dir()]
     store.ensure_bucket()
     report = []
-    extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+    extensions = config.catalog.allowed_extensions
     for name, group_path in groups:
         images, seen_hashes = [], set()
         for path in sorted(group_path.iterdir()):
             if not path.is_file() or path.suffix.lower() not in extensions:
                 continue
-            if path.stat().st_size > 64_000_000:
-                raise ValueError(f'Catalog image exceeds 64 MB: {path.name}')
-            require_memory(256_000_000)
+            if path.stat().st_size > config.limits.source_file_bytes:
+                raise ValueError(f'Catalog image exceeds {config.limits.source_file_bytes} bytes: {path.name}')
+            require_memory(config.memory.decode_reserve_bytes)
             decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             validation = ImageService.validate_image(decoded)
             if not validation:
@@ -200,26 +202,29 @@ def import_local_catalog(directory, store, groups_collection, group_name=None):
             if not color:
                 raise ValueError(str(color.error))
             extension = path.suffix.lower()
-            key = f'catalog/images/{digest}{extension}'
-            mime = 'image/jpeg' if extension in ('.jpg', '.jpeg') else (
-                'image/png' if extension == '.png' else 'application/octet-stream'
+            key = config.storage.catalog_image_key_template.format(sha256=digest, extension=extension)
+            mime = JPEG_CONTENT_TYPE if extension in JPEG_EXTENSIONS else (
+                PNG_CONTENT_TYPE if extension == '.png' else BINARY_CONTENT_TYPE
             )
             reference = store.upload_file(path, key, mime)
             height, width = normalized.value.shape[:2]
             images.append({'object': reference, 'color': list(color.value),
                            'width': width, 'height': height})
-            if len(images) > 100_000:
-                raise ValueError('Catalog group exceeds 100000 images')
+            if len(images) > config.catalog.max_images:
+                raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
         if not images:
             raise ValueError(f'Catalog group {name} contains no supported images')
-        manifest = dict(schema_version=1, group_name=name,
-                        normalization='opencv-uint8-bgr-v1', images=images)
+        manifest = dict(schema_version=SCHEMA_VERSION, group_name=name,
+                        normalization=CATALOG_NORMALIZATION, images=images)
         encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=False).encode('utf-8')
         revision = hashlib.sha256(encoded).hexdigest()
         # The group is metadata; content-addressed objects avoid unsafe names.
-        group_key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:24]
-        manifest_ref = store.put_json(manifest, f'catalog/manifests/{group_key}/{revision}.json')
+        group_key = hashlib.sha256(name.encode('utf-8')).hexdigest()[:GROUP_DIGEST_LENGTH]
+        manifest_key = config.storage.catalog_manifest_key_template.format(
+            group_id=group_key, sha256=revision,
+        )
+        manifest_ref = store.put_json(manifest, manifest_key)
         document = dict(group=name, name=name, count=len(images), revision=revision,
                         manifest=manifest_ref, updated_at=datetime.now(timezone.utc))
         groups_collection.update_one({'_id': name}, {'$set': document}, upsert=True)

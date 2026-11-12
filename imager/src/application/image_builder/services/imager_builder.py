@@ -10,6 +10,8 @@ configure_decoder_limits()
 
 import cv2
 import numpy as np
+from imager_config.loader import config
+from imager_contracts.protocol import COLOR_CHANNELS, OUTPUT_EXTENSIONS
 from settings import settings
 from src.application.image_builder.errors.services_errors import ServicesErrorMessages
 from src.domain.image_builder.repository_interface import ImageCatalog, ImageFiles
@@ -67,7 +69,6 @@ class ImagerBuilder:
         """
         with generation_slot():
             try:
-                self._progress_callback = progress_callback
                 normalized = self._checked(
                     ImageService.normalize_image(image), 'Normalize source'
                 )
@@ -91,7 +92,7 @@ class ImagerBuilder:
                 if not resized:
                     return resized
                 assembled = self.create_result_image(
-                    resized.value, small_width, small_height, group
+                    resized.value, small_width, small_height, group, progress_callback
                 )
                 if not assembled:
                     return self._checked(assembled, 'Assemble mosaic')
@@ -105,8 +106,6 @@ class ImagerBuilder:
                 return blended
             except Exception as error:
                 return ServicesErrorMessages.error_in_make_image(error)
-            finally:
-                self._progress_callback = None
 
     def _check_render_budget(self, width, height):
         cells = width * height
@@ -117,7 +116,7 @@ class ImagerBuilder:
             raise ValueError(f'Output pixel count {pixels} exceeds {MAX_OUTPUT_PIXELS}')
         # Mosaic + resized original + bounded prepared tiles. The shared
         # guard additionally leaves room for native codec allocations.
-        require_memory(6 * pixels + PREPARED_CACHE_LIMIT_BYTES)
+        require_memory(config.memory.render_bytes_per_pixel * pixels + PREPARED_CACHE_LIMIT_BYTES)
 
     def calculate_small_image_dimensions(self, image: np.ndarray) -> tuple[int, int]:
         height, width = image.shape[:2]
@@ -126,14 +125,14 @@ class ImagerBuilder:
         return self.result_size, max(1, self.result_size * height // width)
 
     def create_result_image(self, small_image: np.ndarray, small_width: int,
-                            small_height: int, group: str) -> Result:
+                            small_height: int, group: str, progress_callback=None) -> Result:
         # Render into one destination; the old 1x1 split duplicated it.
-        return self.process_tile(small_image, group)
+        return self.process_tile(small_image, group, progress_callback)
 
-    def process_tile(self, tile: np.ndarray, group: str) -> Result:
+    def process_tile(self, tile: np.ndarray, group: str, progress_callback=None) -> Result:
         try:
             height, width = tile.shape[:2]
-            colors = tile[:, :, :3].reshape(-1, 3).astype(np.int16)
+            colors = tile[:, :, :COLOR_CHANNELS].reshape(-1, COLOR_CHANNELS).astype(np.int16)
             if self.noise_degree:
                 colors += self.rng.integers(
                     -self.noise_degree, self.noise_degree + 1,
@@ -147,13 +146,13 @@ class ImagerBuilder:
             if len(cells) != height * width:
                 return Result.Error('Catalog returned an invalid number of mosaic cells')
             result = np.empty(
-                (height * self.cell_size, width * self.cell_size, 3), dtype=np.uint8
+                (height * self.cell_size, width * self.cell_size, COLOR_CHANNELS), dtype=np.uint8
             )
             prepared = OrderedDict()
             prepared_bytes = 0
             for index, cell in enumerate(cells):
-                if index % 256 == 0 and getattr(self, '_progress_callback', None):
-                    self._progress_callback({
+                if index % config.render.progress_interval_cells == 0 and progress_callback:
+                    progress_callback({
                         'stage': 'rendering', 'completed_cells': index,
                         'total_cells': len(cells),
                     })
@@ -194,8 +193,8 @@ class ImagerBuilder:
                 y, x = divmod(index, width)
                 result[y * self.cell_size:(y + 1) * self.cell_size,
                        x * self.cell_size:(x + 1) * self.cell_size] = cell_image
-            if getattr(self, '_progress_callback', None):
-                self._progress_callback({
+            if progress_callback:
+                progress_callback({
                     'stage': 'rendering', 'completed_cells': len(cells),
                     'total_cells': len(cells),
                 })
@@ -206,12 +205,16 @@ class ImagerBuilder:
     def save_image(self, final_image: np.ndarray,
                    output_name: str | None = None) -> Result:
         extension = settings.generated_image_extension.lower().lstrip('.')
-        if extension not in ('jpg', 'jpeg', 'png'):
+        if extension not in OUTPUT_EXTENSIONS:
             return Result.Error('Output format must be jpg, jpeg or png')
         # Preserve the Telegram username/date stem and add a server suffix.
-        stem = re.sub(r'[^\w-]+', '_', output_name or 'imager').strip('_')[:96] or 'imager'
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-        name = f'{stem}_{timestamp}_{uuid4().hex[:12]}.{extension}'
+        stem = re.sub(r'[^\w-]+', '_', output_name or config.render.output_stem).strip('_')
+        stem = stem[:config.render.output_stem_max_length] or config.render.output_stem
+        timestamp = datetime.now(timezone.utc).strftime(config.render.output_timestamp_format)
+        suffix = uuid4().hex[:config.render.output_random_suffix_length]
+        name = config.render.output_filename_template.format(
+            stem=stem, timestamp=timestamp, suffix=suffix, extension=extension,
+        )
         root = os.path.abspath(os.path.join(settings.file_path_prefix,
                                             settings.generated_images_path))
         os.makedirs(root, exist_ok=True)

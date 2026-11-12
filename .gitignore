@@ -174,3 +174,8 @@ files/
 .local/
 infra/.env
 infra/secrets/
+
+# Machine-local launch scripts and runtime overrides.
+/1.cmd
+*.ps1
+config/*.local.toml

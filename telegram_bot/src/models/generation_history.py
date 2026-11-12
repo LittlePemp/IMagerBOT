@@ -4,10 +4,12 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from imager_contracts.protocol import HISTORY_ID_HEX_LENGTH, HISTORY_ID_NAMESPACE
+
 
 def generation_history_record_id(job_id: str) -> str:
     """One stable Mongo identity for each accepted generation command."""
-    return hashlib.sha256(f'imager-history:{job_id}'.encode()).hexdigest()[:24]
+    return hashlib.sha256(f'{HISTORY_ID_NAMESPACE}{job_id}'.encode()).hexdigest()[:HISTORY_ID_HEX_LENGTH]
 
 
 class GenerationHistoryRecord(BaseModel):

@@ -12,6 +12,8 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from imager_contracts import make_submission
+from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH
+from imager_config.loader import config as runtime_config
 from src.infrastructure.services.object_storage import BotObjectStorage
 from src.utils.loggers import service_logger
 
@@ -33,8 +35,11 @@ class ImagerService:
     def database(self):
         if self._database is None:
             self._mongo_client = MongoClient(
-                self.config.mongodb_uri, tz_aware=True, serverSelectionTimeoutMS=10000,
-                connectTimeoutMS=5000, socketTimeoutMS=10000, waitQueueTimeoutMS=10000,
+                self.config.mongodb_uri, tz_aware=True,
+                serverSelectionTimeoutMS=runtime_config.mongo.server_selection_timeout_ms,
+                connectTimeoutMS=runtime_config.mongo.connect_timeout_ms,
+                socketTimeoutMS=runtime_config.mongo.socket_timeout_ms,
+                waitQueueTimeoutMS=runtime_config.mongo.wait_queue_timeout_ms,
             )
             self._database = self._mongo_client[self.config.imager_database_name]
         return self._database
@@ -52,7 +57,7 @@ class ImagerService:
 
     @property
     def jobs(self):
-        return self.database['generation_jobs']
+        return self.database[runtime_config.mongo.jobs_collection]
 
     async def get_job(self, job_id):
         return await asyncio.to_thread(self.jobs.find_one, {'_id': job_id})
@@ -67,7 +72,7 @@ class ImagerService:
     async def submit_generation(self, request, *, job_id, client_context):
         """A successful return means command+pending outbox are persisted."""
         group = await asyncio.to_thread(
-            self.database['catalog_groups'].find_one, {'_id': request.group_name}
+            self.database[runtime_config.mongo.catalog_collection].find_one, {'_id': request.group_name}
         )
         if not group or not group.get('manifest') or not group.get('count', 0):
             raise ValueError('Выбранная библиотека отсутствует или пуста. Обновите список групп.')
@@ -77,7 +82,7 @@ class ImagerService:
             'source': request.source,
             'parameters': parameters,
             'catalog_manifest': group['manifest'],
-            'seed': int(hashlib.sha256(job_id.encode('utf-8')).hexdigest()[:8], 16),
+            'seed': int(hashlib.sha256(job_id.encode('utf-8')).hexdigest()[:GENERATION_SEED_HEX_LENGTH], 16),
             'client_id': 'telegram',
             'client_context': dict(client_context),
         }
@@ -97,7 +102,8 @@ class ImagerService:
                 raise ValueError('Идентификатор задания уже использован с другими параметрами.')
             service_logger.info(f'Generation command accepted: job_id={job_id}')
             return GenerationAccepted(
-                job_id=job_id, status=stored['status'], workflow_id=f'imager:{job_id}',
+                job_id=job_id, status=stored['status'],
+                workflow_id=f'{runtime_config.temporal.workflow_id_prefix}{job_id}',
             )
         except Exception:
             service_logger.exception(f'Generation submission failed: job_id={job_id}')
@@ -105,7 +111,7 @@ class ImagerService:
 
     async def list_groups(self):
         documents = await asyncio.to_thread(
-            lambda: list(self.database['catalog_groups'].find({}, {'group': 1, 'count': 1}))
+            lambda: list(self.database[runtime_config.mongo.catalog_collection].find({}, {'group': 1, 'count': 1}))
         )
         return ListGroupsResponse(groups=[
             GroupInfo(group=item.get('group', item['_id']), count=item['count'])
@@ -197,9 +203,13 @@ class ImagerService:
             {'_id': job_id, 'completion_outbox.state': 'claimed', 'completion_outbox.token': token},
             {'$set': {
                 'completion_outbox.state': 'failed' if exhausted else 'pending',
-                'completion_outbox.error': str(error)[:2000],
+                'completion_outbox.error': str(error)[:runtime_config.bot.error_max_length],
                 'completion_outbox.available_at': datetime.now(timezone.utc) + timedelta(
-                    seconds=min(2 ** attempts, 60)
+                    seconds=min(
+                        runtime_config.bot.notification_retry_initial_seconds
+                        * runtime_config.bot.notification_retry_backoff_coefficient ** (attempts - 1),
+                        runtime_config.bot.notification_retry_max_seconds,
+                    )
                 ),
                 'completion_outbox.lease_until': None,
             }},

@@ -9,14 +9,18 @@ from functools import lru_cache
 @lru_cache(maxsize=1)
 def create_job_repository():
     from pymongo import MongoClient
+    from imager_config.loader import config
     from settings import settings
     from src.infrastructure.jobs.mongo_jobs import MongoJobRepository
     client = MongoClient(
-        settings.mongodb_uri, tz_aware=True, serverSelectionTimeoutMS=10000,
-        connectTimeoutMS=5000, socketTimeoutMS=10000, waitQueueTimeoutMS=10000,
+        settings.mongodb_uri, tz_aware=True,
+        serverSelectionTimeoutMS=config.mongo.server_selection_timeout_ms,
+        connectTimeoutMS=config.mongo.connect_timeout_ms,
+        socketTimeoutMS=config.mongo.socket_timeout_ms,
+        waitQueueTimeoutMS=config.mongo.wait_queue_timeout_ms,
     )
     repository = MongoJobRepository(
-        client[settings.database_name].generation_jobs,
+        client[settings.database_name][config.mongo.jobs_collection],
         lease_seconds=settings.job_execution_lease_seconds,
     )
     repository.ensure_indexes()

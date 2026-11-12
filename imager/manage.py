@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+# The two applications share configuration and wire contracts at repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from src.shared_kernel.resource_limits import configure_decoder_limits
 
 configure_decoder_limits()

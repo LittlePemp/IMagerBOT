@@ -12,6 +12,7 @@ from src.presentation.api.schemas import (GenerateImageRequest,
                                           GenerateImageResponse,
                                           ListGroupsResponse,
                                           SyncGroupsResponse)
+from imager_config.loader import config
 from src.shared_kernel.loggers import presentation_logger
 from src.presentation.api.workers import accepting_requests, generation_queue
 
@@ -43,7 +44,7 @@ async def generate_image(request: GenerateImageRequest):
     try:
         return await asyncio.wait_for(
             asyncio.shield(future),
-            timeout=getattr(settings, 'api_request_timeout_seconds', 600),
+            timeout=getattr(settings, 'api_request_timeout_seconds', config.legacy.api_request_timeout_seconds),
         )
     except asyncio.TimeoutError:
         future.cancel()

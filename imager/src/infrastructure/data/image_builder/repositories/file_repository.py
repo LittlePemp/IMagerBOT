@@ -1,5 +1,6 @@
 import os
 import tempfile
+from imager_config.loader import config
 
 from src.shared_kernel.resource_limits import (
     MAX_SOURCE_FILE_BYTES, configure_decoder_limits, require_memory,
@@ -25,7 +26,7 @@ class FileRepository:
         if os.path.isfile(normalized_path):
             return normalized_path
 
-        groups_marker = os.path.normpath(os.path.join('files', 'groups'))
+        groups_marker = os.path.normpath(config.paths.image_groups)
         normalized_lower = normalized_path.lower()
         marker_lower = groups_marker.lower()
 
@@ -58,7 +59,7 @@ class FileRepository:
             if os.path.getsize(resolved_path) > MAX_SOURCE_FILE_BYTES:
                 raise ValueError(f'Encoded image exceeds {MAX_SOURCE_FILE_BYTES} bytes: {resolved_path}')
             # Worst supported uint16 BGRA source plus its uint8 normalization.
-            require_memory(256_000_000)
+            require_memory(config.memory.decode_reserve_bytes)
             image = cv2.imread(resolved_path, cv2.IMREAD_UNCHANGED)
             if image is None:
                 raise ValueError(f'Cannot decode image: {resolved_path}')
@@ -81,7 +82,8 @@ class FileRepository:
                 raise ValueError('Output image must be inside the generated images directory')
             os.makedirs(root, exist_ok=True)
             descriptor, temporary_path = tempfile.mkstemp(
-                prefix='.imager-', suffix=os.path.splitext(destination)[1], dir=os.path.dirname(destination)
+                prefix=config.storage.local_result_temp_prefix,
+                suffix=os.path.splitext(destination)[1], dir=os.path.dirname(destination)
             )
             os.close(descriptor)
             if save_params is None:

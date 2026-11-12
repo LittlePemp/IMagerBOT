@@ -1,10 +1,12 @@
 import threading
 import time
 import unittest
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from temporalio.exceptions import ApplicationError
+from imager_config.loader import config
 from src.infrastructure.jobs.mongo_jobs import JobBusy, LostExecution
 from src.presentation.temporal.activities import LeaseHeartbeat, RenderActivities
 
@@ -20,6 +22,10 @@ def request():
                        'noise_level': 15, 'cell_size': 40, 'result_size': 120},
         'seed': 42,
     }
+
+
+def policy(maximum_attempts=3):
+    return dict(asdict(config.temporal.render), maximum_attempts=maximum_attempts)
 
 
 class TransientStorageError(RuntimeError):
@@ -57,7 +63,7 @@ class TestTemporalActivity(unittest.TestCase):
         self.repository.claim_execution.return_value = {
             'already_completed': True, 'result': self.reference, 'token': None,
         }
-        actual = self.activities.render_image(request())
+        actual = self.activities.render_image(request(), policy())
         self.assertEqual(actual, self.reference)
         self.executor.execute.assert_not_called()
         self.repository.complete.assert_not_called()
@@ -73,7 +79,7 @@ class TestTemporalActivity(unittest.TestCase):
             return self.reference
 
         self.executor.execute.side_effect = execute
-        actual = self.activities.render_image(request())
+        actual = self.activities.render_image(request(), policy())
         self.assertEqual(actual, self.reference)
         self.repository.complete.assert_called_once_with('job_1', 'token', self.reference)
         self.repository.heartbeat_execution.assert_called()
@@ -85,7 +91,7 @@ class TestTemporalActivity(unittest.TestCase):
     def test_permanent_render_error_marks_failed_without_retry(self):
         self.executor.execute.side_effect = ValueError('unsupported image')
         with self.assertRaises(ApplicationError) as failed:
-            self.activities.render_image(request())
+            self.activities.render_image(request(), policy())
         self.assertTrue(failed.exception.non_retryable)
         self.assertEqual(failed.exception.type, 'RenderRejected')
         self.repository.fail.assert_called_once()
@@ -96,7 +102,7 @@ class TestTemporalActivity(unittest.TestCase):
     def test_transient_render_error_releases_for_retry_and_stops_thread(self):
         self.executor.execute.side_effect = TransientStorageError('MinIO unavailable')
         with self.assertRaises(ApplicationError) as failed:
-            self.activities.render_image(request())
+            self.activities.render_image(request(), policy())
         self.assertFalse(failed.exception.non_retryable)
         self.assertEqual(failed.exception.type, 'TransientRenderError')
         self.repository.retry_execution.assert_called_once()
@@ -107,15 +113,46 @@ class TestTemporalActivity(unittest.TestCase):
         self.sdk_info.return_value = SimpleNamespace(attempt=3)
         self.executor.execute.side_effect = TransientStorageError('still unavailable')
         with self.assertRaises(ApplicationError):
+            self.activities.render_image(request(), policy())
+        self.repository.fail.assert_called_once()
+        self.repository.retry_execution.assert_not_called()
+        self.assert_no_heartbeat_threads()
+
+    def test_retry_cutoff_uses_workflow_snapshot_instead_of_current_config(self):
+        self.sdk_info.return_value = SimpleNamespace(attempt=3)
+        self.executor.execute.side_effect = TransientStorageError('temporary failure')
+        with self.assertRaises(ApplicationError):
+            self.activities.render_image(request(), policy(7))
+        self.repository.retry_execution.assert_called_once()
+        self.repository.fail.assert_not_called()
+        self.assert_no_heartbeat_threads()
+
+    def test_legacy_one_argument_activity_uses_historical_retry_cutoff(self):
+        self.sdk_info.return_value = SimpleNamespace(attempt=3)
+        self.executor.execute.side_effect = TransientStorageError('old failure')
+        current = replace(config, temporal=replace(
+            config.temporal, render=replace(config.temporal.render, maximum_attempts=7),
+        ))
+        with patch('src.presentation.temporal.activities.config', current), self.assertRaises(ApplicationError):
             self.activities.render_image(request())
         self.repository.fail.assert_called_once()
         self.repository.retry_execution.assert_not_called()
         self.assert_no_heartbeat_threads()
 
+    def test_heartbeat_cadence_respects_older_workflow_timeout(self):
+        saved = policy()
+        saved['heartbeat_seconds'] = 6.0
+        current = replace(config, jobs=replace(config.jobs, heartbeat_interval_seconds=20.0))
+        with patch('src.presentation.temporal.activities.config', current), patch(
+            'src.presentation.temporal.activities.LeaseHeartbeat',
+        ) as heartbeat:
+            self.activities.render_image(request(), saved)
+        heartbeat.assert_called_once_with(self.repository, 'job_1', 'token', interval=2.0)
+
     def test_lost_completion_ownership_is_not_success(self):
         self.repository.complete.side_effect = LostExecution('another attempt won')
         with self.assertRaises(ApplicationError) as failed:
-            self.activities.render_image(request())
+            self.activities.render_image(request(), policy())
         self.assertFalse(failed.exception.non_retryable)
         self.repository.complete.assert_called_once()
         self.repository.retry_execution.assert_called_once()
@@ -132,7 +169,7 @@ class TestTemporalActivity(unittest.TestCase):
         malformed.extend((missing_seed, {}, {'unknown': 'field'}))
         for invalid in malformed:
             with self.subTest(invalid=invalid), self.assertRaises(ApplicationError) as failed:
-                self.activities.render_image(invalid)
+                self.activities.render_image(invalid, policy())
             self.assertTrue(failed.exception.non_retryable)
         self.repository.claim_execution.assert_not_called()
         self.executor.execute.assert_not_called()
@@ -146,7 +183,7 @@ class TestTemporalActivity(unittest.TestCase):
 
         self.executor.execute.side_effect = execute
         with self.assertRaises(ApplicationError):
-            self.activities.render_image(request())
+            self.activities.render_image(request(), policy())
         self.repository.complete.assert_not_called()
         self.assert_no_heartbeat_threads()
 
@@ -154,7 +191,7 @@ class TestTemporalActivity(unittest.TestCase):
         claim = self.repository.claim_execution.return_value
         self.repository.claim_execution.side_effect = [JobBusy('owned by previous attempt'), claim]
         with patch('src.presentation.temporal.activities.time.sleep') as sleep:
-            actual = self.activities.render_image(request())
+            actual = self.activities.render_image(request(), policy())
         self.assertEqual(actual, self.reference)
         self.assertEqual(self.repository.claim_execution.call_count, 2)
         sleep.assert_called_once_with(2)
@@ -166,7 +203,7 @@ class TestTemporalActivity(unittest.TestCase):
     def test_initial_heartbeat_failure_does_not_start_a_thread(self):
         self.repository.heartbeat_execution.side_effect = LostExecution('claim lost before render')
         with self.assertRaises(ApplicationError):
-            self.activities.render_image(request())
+            self.activities.render_image(request(), policy())
         self.executor.execute.assert_not_called()
         self.repository.retry_execution.assert_called_once()
         self.assert_no_heartbeat_threads()

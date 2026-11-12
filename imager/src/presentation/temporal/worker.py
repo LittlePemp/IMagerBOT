@@ -8,6 +8,7 @@ from datetime import timedelta
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository, create_render_executor
 from src.presentation.temporal.activities import RenderActivities
@@ -25,8 +26,8 @@ async def connect_temporal():
         except asyncio.CancelledError:
             raise
         except Exception:
-            presentation_logger.exception('Temporal is unavailable; worker reconnects in 3 seconds')
-            await asyncio.sleep(3)
+            presentation_logger.exception('Temporal is unavailable; worker reconnects')
+            await asyncio.sleep(config.temporal.worker.reconnect_seconds)
 
 
 async def main():
@@ -42,8 +43,9 @@ async def main():
         except (NotImplementedError, RuntimeError):
             pass
 
-    identity = getattr(settings, 'temporal_worker_identity', '') or os.environ.get('HOSTNAME', 'imager-worker')
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix='imager-render') as executor:
+    worker_config = config.temporal.worker
+    identity = settings.temporal_worker_identity or os.environ.get('HOSTNAME', worker_config.identity_fallback)
+    with ThreadPoolExecutor(max_workers=worker_config.activity_slots, thread_name_prefix='imager-render') as executor:
         worker = Worker(
             client,
             identity=identity,
@@ -51,16 +53,16 @@ async def main():
             workflows=[GenerateImageWorkflow],
             activities=[activities.render_image, activities.record_job_failure],
             activity_executor=executor,
-            max_concurrent_activities=1,
-            max_concurrent_workflow_tasks=2,
-            max_cached_workflows=20,
-            disable_eager_activity_execution=True,
-            graceful_shutdown_timeout=timedelta(seconds=30),
+            max_concurrent_activities=worker_config.activity_slots,
+            max_concurrent_workflow_tasks=worker_config.workflow_task_slots,
+            max_cached_workflows=worker_config.cached_workflows,
+            disable_eager_activity_execution=worker_config.disable_eager_execution,
+            graceful_shutdown_timeout=timedelta(seconds=worker_config.shutdown_seconds),
         )
         async with worker:
             presentation_logger.info(
                 f'Temporal worker ready: identity={identity}, '
-                f'queue={settings.temporal_task_queue}, render_slots=1'
+                f'queue={settings.temporal_task_queue}, render_slots={worker_config.activity_slots}'
             )
             await stop.wait()
 

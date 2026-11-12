@@ -4,45 +4,47 @@ from typing import List, Tuple
 
 from pydantic import ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
+from imager_config.loader import config
+from imager_contracts.protocol import OUTPUT_EXTENSIONS, PERCENT_MAX
 
 
 class Settings(BaseSettings):
     mongodb_uri: str
-    database_name: str
-    temporal_address: str = 'temporal:7233'
-    temporal_namespace: str = 'imager'
-    temporal_task_queue: str = 'imager-render'
-    temporal_dispatch_poll_seconds: float = Field(default=1, gt=0, le=60)
+    database_name: str = config.mongo.core_database
+    temporal_address: str = config.temporal.address
+    temporal_namespace: str = config.temporal.namespace
+    temporal_task_queue: str = config.temporal.task_queue
+    temporal_dispatch_poll_seconds: float = Field(default=config.temporal.dispatcher.poll_seconds, gt=0, le=60)
     temporal_worker_identity: str = ''
-    job_execution_lease_seconds: int = Field(default=60, ge=30, le=600)
-    minio_endpoint: str = 'minio:9000'
+    job_execution_lease_seconds: int = Field(default=config.jobs.execution_lease_seconds, ge=30, le=600)
+    minio_endpoint: str = config.storage.endpoint
     minio_access_key: SecretStr = SecretStr('')
     minio_secret_key: SecretStr = SecretStr('')
-    minio_bucket: str = 'imager'
-    minio_secure: bool = False
-    rabbitmq_url: str = 'amqp://guest:guest@127.0.0.1:5672/'
-    rabbitmq_requests_queue: str = 'imager.requests'
+    minio_bucket: str = config.storage.bucket
+    minio_secure: bool = config.storage.secure
+    rabbitmq_url: str = config.legacy.rabbitmq_url
+    rabbitmq_requests_queue: str = config.legacy.rabbitmq_requests_queue
     file_path_prefix: str = ''
-    image_groups_relative_path: str = 'files/groups'
-    uploaded_images_path: str = 'files/uploaded'
-    generated_images_path: str = 'files/generated'
-    generated_image_extension: str = 'jpg'
-    generated_image_jpeg_quality: int = Field(default=90, ge=1, le=100)
-    telegram_max_document_size_bytes: int = Field(default=47185920, gt=0)
-    generation_estimated_jpeg_bytes_per_pixel: float = Field(default=1.0, gt=0, allow_inf_nan=False)
-    rabbitmq_prefetch_count: int = Field(default=1, ge=1, le=8)
-    api_queue_maxsize: int = Field(default=8, ge=1, le=100)
-    api_request_timeout_seconds: float = Field(default=600, gt=0, le=3600)
-    api_shutdown_timeout_seconds: float = Field(default=30, gt=0, le=300)
-    rabbitmq_max_retries: int = Field(default=2, ge=0, le=5)
-    rpc_result_ttl_seconds: int = Field(default=86400, ge=60, le=604800)
-    rpc_result_max_entries: int = Field(default=1000, ge=1, le=10000)
+    image_groups_relative_path: str = config.paths.image_groups
+    uploaded_images_path: str = config.paths.uploads
+    generated_images_path: str = config.paths.generated
+    generated_image_extension: str = config.render.output_extension
+    generated_image_jpeg_quality: int = Field(default=config.render.jpeg_quality, ge=1, le=PERCENT_MAX)
+    telegram_max_document_size_bytes: int = Field(default=config.render.max_output_bytes, gt=0)
+    generation_estimated_jpeg_bytes_per_pixel: float = Field(default=config.render.estimated_jpeg_bytes_per_pixel, gt=0, allow_inf_nan=False)
+    rabbitmq_prefetch_count: int = Field(default=config.legacy.rabbitmq_prefetch_count, ge=1, le=8)
+    api_queue_maxsize: int = Field(default=config.legacy.api_queue_maxsize, ge=1, le=100)
+    api_request_timeout_seconds: float = Field(default=config.legacy.api_request_timeout_seconds, gt=0, le=3600)
+    api_shutdown_timeout_seconds: float = Field(default=config.legacy.api_shutdown_timeout_seconds, gt=0, le=300)
+    rabbitmq_max_retries: int = Field(default=config.legacy.rabbitmq_max_retries, ge=0, le=5)
+    rpc_result_ttl_seconds: int = Field(default=config.legacy.rpc_result_ttl_seconds, ge=60, le=604800)
+    rpc_result_max_entries: int = Field(default=config.legacy.rpc_result_max_entries, ge=1, le=10000)
 
     # Image validation settings
-    allowed_formats: List[str] = ['RGB', 'RGBA']
-    min_size: Tuple[int, int] = (20, 20)
-    max_size: Tuple[int, int] = (4000, 4000)
-    aspect_ratio_limits: Tuple[float, float] = (9 / 16, 16 / 9)
+    allowed_formats: List[str] = list(config.image.allowed_color_modes)
+    min_size: Tuple[int, int] = (config.image.min_width, config.image.min_height)
+    max_size: Tuple[int, int] = (config.image.max_width, config.image.max_height)
+    aspect_ratio_limits: Tuple[float, float] = (config.image.aspect_ratio_min, config.image.aspect_ratio_max)
 
     _directories_created: bool = False
 
@@ -69,12 +71,13 @@ class Settings(BaseSettings):
             raise ValueError('Image dimensions must be positive')
         if any(low > high for low, high in zip(self.min_size, self.max_size)):
             raise ValueError('Minimum image dimensions must not exceed maximum dimensions')
-        if any(value > 4000 for value in self.max_size):
+        if any(value > limit for value, limit in zip(
+                self.max_size, (config.limits.decoder_width, config.limits.decoder_height))):
             raise ValueError('Input image dimensions must fit the 4000 pixel decoder safety ceiling')
         low, high = self.aspect_ratio_limits
         if not (math.isfinite(low) and math.isfinite(high) and 0 < low <= high):
             raise ValueError('Aspect ratio limits must be finite, positive and ordered')
-        if self.generated_image_extension.lower().lstrip('.') not in ('jpg', 'jpeg', 'png'):
+        if self.generated_image_extension.lower().lstrip('.') not in OUTPUT_EXTENSIONS:
             raise ValueError('Output format must be jpg, jpeg or png')
         return self
 

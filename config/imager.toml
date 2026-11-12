@@ -1,0 +1,211 @@
+# Shared application defaults. Secrets stay in environment variables.
+# Administrator-selected generation parameters still live in MongoDB.
+
+[limits]
+memory_bytes = 1000000000
+memory_headroom_bytes = 64000000
+original_cache_bytes = 256000000
+prepared_cache_bytes = 64000000
+source_file_bytes = 64000000
+source_pixels = 16000000
+output_pixels = 48000000
+cells = 250000
+decoder_width = 4000
+decoder_height = 4000
+cell_size = 2000
+result_size = 1000
+
+[memory]
+decode_reserve_bytes = 256000000
+manifest_reserve_bytes = 64000000
+catalog_check_reserve_bytes = 32000000
+encode_reserve_bytes = 64000000
+cache_eviction_step_bytes = 32000000
+render_bytes_per_pixel = 6
+
+[render]
+jpeg_quality = 90
+max_output_bytes = 47185920
+progress_interval_cells = 256
+output_extension = "jpg"
+estimated_jpeg_bytes_per_pixel = 1.0
+output_stem = "imager"
+output_stem_max_length = 96
+output_random_suffix_length = 12
+output_timestamp_format = "%Y%m%dT%H%M%S%fZ"
+output_filename_template = "{stem}_{timestamp}_{suffix}.{extension}"
+
+[image]
+min_width = 20
+min_height = 20
+max_width = 4000
+max_height = 4000
+aspect_ratio_min = 0.5625
+aspect_ratio_max = 1.7777777777777777
+allowed_color_modes = ["RGB", "RGBA"]
+
+[storage]
+endpoint = "minio:9000"
+bucket = "imager"
+secure = false
+connect_timeout_seconds = 5.0
+read_timeout_seconds = 30.0
+retry_attempts = 2
+retry_backoff_seconds = 0.2
+transfer_chunk_bytes = 1048576
+upload_parallelism = 1
+source_filename = "source.bin"
+upload_filename = "source.jpg"
+cell_filename = "original.bin"
+manifest_filename = "manifest.json"
+result_filename = "result.jpg"
+source_key_template = "uploads/{job_id}/{sha256}.jpg"
+result_key_template = "jobs/{job_id}/attempts/{execution_token}/{result_filename}"
+catalog_image_key_template = "catalog/images/{sha256}{extension}"
+catalog_manifest_key_template = "catalog/manifests/{group_id}/{sha256}.json"
+render_temp_prefix = "imager-render-"
+cell_temp_prefix = "imager-cell-"
+manifest_temp_prefix = "imager-manifest-"
+json_temp_prefix = "imager-json-"
+download_temp_prefix = ".download-"
+upload_temp_prefix = "imager-upload-"
+result_temp_prefix = "imager-result-"
+local_result_temp_prefix = ".imager-"
+rpc_temp_prefix = ".rpc-"
+
+[catalog]
+max_manifest_bytes = 16000000
+max_images = 100000
+validation_interval = 128
+allowed_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]
+
+[mongo]
+connect_timeout_ms = 5000
+socket_timeout_ms = 10000
+server_selection_timeout_ms = 10000
+wait_queue_timeout_ms = 10000
+core_database = "imager_core"
+bot_database = "telegram_bot"
+jobs_collection = "generation_jobs"
+catalog_collection = "catalog_groups"
+
+[jobs]
+execution_lease_seconds = 60
+dispatch_retry_seconds = 5
+error_max_length = 8192
+heartbeat_interval_seconds = 5.0
+heartbeat_renew_divisor = 3.0
+heartbeat_join_seconds = 15.0
+claim_wait_seconds = 2.0
+
+[temporal]
+address = "temporal:7233"
+namespace = "imager"
+task_queue = "imager-render"
+workflow_id_prefix = "imager:"
+
+[temporal.worker]
+reconnect_seconds = 3.0
+identity_fallback = "imager-worker"
+activity_slots = 1
+workflow_task_slots = 2
+cached_workflows = 20
+disable_eager_execution = true
+shutdown_seconds = 30.0
+
+[temporal.dispatcher]
+poll_seconds = 1.0
+reconnect_seconds = 3.0
+reconcile_seconds = 10.0
+reconcile_batch_size = 20
+
+[temporal.render]
+start_to_close_seconds = 900.0
+schedule_to_close_seconds = 86400.0
+heartbeat_seconds = 30.0
+retry_initial_seconds = 2.0
+retry_maximum_seconds = 30.0
+maximum_attempts = 3
+
+[temporal.failure]
+start_to_close_seconds = 30.0
+schedule_to_close_seconds = 300.0
+retry_initial_seconds = 1.0
+retry_maximum_seconds = 10.0
+maximum_attempts = 5
+
+[bot]
+timezone = "Europe/Moscow"
+notification_poll_seconds = 2.0
+notification_lease_seconds = 120
+notification_max_attempts = 5
+notification_retry_initial_seconds = 2.0
+notification_retry_backoff_coefficient = 2.0
+notification_retry_max_seconds = 60.0
+notification_renew_divisor = 3.0
+notification_renew_min_seconds = 1.0
+error_max_length = 2000
+error_excerpt_length = 1600
+shutdown_seconds = 30.0
+api_timeout_seconds = 60.0
+download_timeout_seconds = 30.0
+noise_min = 0
+noise_max = 100
+cell_size_min = 1
+cell_size_max = 200
+result_size_min = 1
+result_size_max = 300
+regular_user_upload_limit = 5
+
+[generation]
+insertion_format = "crop"
+alpha_channel = 30
+noise_level = 15
+cell_size = 40
+result_size = 120
+
+[paths]
+image_groups = "files/groups"
+uploads = "files/uploaded"
+generated = "files/generated"
+data_root = ".local/data"
+compose_env = "infra/.env"
+legacy_bot_env = "telegram_bot/.env"
+secrets_root = ".local/secrets"
+ui_credentials = "ui-credentials.json"
+ui_password_hash = "temporal-ui.htpasswd"
+readable_credentials = "local-credentials.txt"
+mongo_directory = "mongo"
+minio_directory = "minio"
+temporal_directory = "temporal"
+worker_scratch_directory = "scratch"
+bot_scratch_directory = "bot-scratch"
+client_temp_directory = "client-tmp"
+rpc_journal_directory = ".rpc-results"
+
+[auth]
+ui_username = "imager"
+ui_password_min_length = 16
+ui_password_random_bytes = 24
+mongo_password_random_bytes = 30
+minio_access_random_bytes = 15
+minio_secret_random_bytes = 30
+
+[legacy]
+rabbitmq_url = "amqp://guest:guest@127.0.0.1:5672/"
+rabbitmq_requests_queue = "imager.requests"
+rabbitmq_prefetch_count = 1
+api_queue_maxsize = 8
+api_request_timeout_seconds = 600.0
+api_shutdown_timeout_seconds = 30.0
+rabbitmq_max_retries = 2
+rpc_result_ttl_seconds = 86400
+rpc_result_max_entries = 1000
+
+[logging]
+rotation_bytes = 10000000
+retained_archives = 3
+
+[deployment]
+temporal_ui_port = 8088
+minio_console_port = 9001

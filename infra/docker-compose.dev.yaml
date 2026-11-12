@@ -8,16 +8,15 @@ x-logging: &logging
 
 x-core-environment: &core-environment
   MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
-  DATABASE_NAME: imager_core
-  TEMPORAL_ADDRESS: temporal:7233
-  TEMPORAL_NAMESPACE: imager
-  TEMPORAL_TASK_QUEUE: imager-render
-  TEMPORAL_DISPATCH_POLL_SECONDS: "1"
-  MINIO_ENDPOINT: minio:9000
+  IMAGER_CONFIG_FILE: /app/config/runtime.toml
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
-  MINIO_BUCKET: imager
-  MINIO_SECURE: "false"
+
+x-config-volume: &config-volume
+  type: bind
+  source: ${IMAGER_CONFIG_SOURCE:?Run infra/setup.py}
+  target: /app/config/runtime.toml
+  read_only: true
 
 x-core: &core
   image: imager-temporal/core:local
@@ -25,6 +24,8 @@ x-core: &core
     context: ..
     dockerfile: imager/Dockerfile
   environment: *core-environment
+  volumes:
+    - *config-volume
   restart: unless-stopped
   logging: *logging
   init: true
@@ -47,7 +48,7 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Run infra/setup.py}
     volumes:
       - type: bind
-        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/mongo
+        source: ${IMAGER_MONGO_DATA_PATH:?Run infra/setup.py}
         target: /data/db
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "quit(db.adminCommand('ping').ok ? 0 : 1)"]
@@ -68,10 +69,10 @@ services:
     command: ["server", "/data", "--console-address", ":9001"]
     volumes:
       - type: bind
-        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/minio
+        source: ${IMAGER_MINIO_DATA_PATH:?Run infra/setup.py}
         target: /data
     ports:
-      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:?Run infra/setup.py}:9001"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
@@ -91,12 +92,12 @@ services:
       - --ip
       - 0.0.0.0
       - --namespace
-      - imager
+      - ${IMAGER_TEMPORAL_NAMESPACE:?Run infra/setup.py}
       - --db-filename
       - /data/temporal.db
     volumes:
       - type: bind
-        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/temporal
+        source: ${IMAGER_TEMPORAL_DATA_PATH:?Run infra/setup.py}
         target: /data
     # No host UI/gRPC ports: UI is reachable only through authenticated nginx.
     healthcheck:
@@ -113,7 +114,7 @@ services:
       temporal:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${TEMPORAL_UI_PORT:-8088}:8080"
+      - "127.0.0.1:${TEMPORAL_UI_PORT:?Run infra/setup.py}:8080"
     volumes:
       - ./nginx/temporal-ui.conf:/etc/nginx/conf.d/default.conf:ro
     secrets:
@@ -136,10 +137,11 @@ services:
     # so --scale imager-worker=2 creates another independently bounded worker.
     mem_limit: 1000000000
     volumes:
+      - *config-volume
       # Only unique TemporaryDirectory attempt scratch, never persistent image
       # references. Files are removed on normal completion; no shared-path API.
       - type: bind
-        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/scratch
+        source: ${IMAGER_WORKER_SCRATCH_PATH:?Run infra/setup.py}
         target: /tmp
 
   telegram-bot:
@@ -155,17 +157,14 @@ services:
       API_TOKEN: ${API_TOKEN:-}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       MONGODB_URI: mongodb://imager:${MONGO_PASSWORD:?Run infra/setup.py}@mongodb:27017/?authSource=admin
-      DATABASE_NAME: telegram_bot
-      IMAGER_DATABASE_NAME: imager_core
-      MINIO_ENDPOINT: minio:9000
+      IMAGER_CONFIG_FILE: /app/config/runtime.toml
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Run infra/setup.py}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Run infra/setup.py}
-      MINIO_BUCKET: imager
-      MINIO_SECURE: "false"
       TMPDIR: /tmp
     volumes:
+      - *config-volume
       - type: bind
-        source: ${IMAGER_DATA_ROOT:?Run infra/setup.py}/bot-scratch
+        source: ${IMAGER_BOT_SCRATCH_PATH:?Run infra/setup.py}
         target: /tmp
     depends_on:
       mongodb:
@@ -179,8 +178,9 @@ services:
     restart: "no"
     command: ["python", "-m", "src.presentation.cli.catalog_cli", "/imports"]
     volumes:
-      - ${IMAGER_IMPORT_ROOT:-../imager/files/groups}:/imports:ro
+      - *config-volume
+      - ${IMAGER_IMPORT_ROOT:?Run infra/setup.py}:/imports:ro
 
 secrets:
   temporal_ui_htpasswd:
-    file: ${IMAGER_SECRETS_ROOT:?Run infra/setup.py}/temporal-ui.htpasswd
+    file: ${IMAGER_TEMPORAL_UI_AUTH_FILE:?Run infra/setup.py}

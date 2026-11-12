@@ -7,14 +7,16 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from imager_contracts import JobRequest
+from imager_contracts.workflow_versions import LEGACY_RENDER_POLICY_V1
+from imager_config.loader import config
 from src.infrastructure.jobs.mongo_jobs import JobBusy, LostExecution
 from src.shared_kernel.loggers import presentation_logger
 
 
 class LeaseHeartbeat:
-    def __init__(self, repository, job_id, token, interval=5):
+    def __init__(self, repository, job_id, token, interval=None):
         self.repository, self.job_id, self.token = repository, job_id, token
-        self.interval = interval
+        self.interval = config.jobs.heartbeat_interval_seconds if interval is None else interval
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.details = {'job_id': job_id, 'stage': 'starting'}
@@ -60,20 +62,23 @@ class LeaseHeartbeat:
 
     def __exit__(self, *exception):
         self.stop.set()
-        self.thread.join(timeout=15)
+        self.thread.join(timeout=config.jobs.heartbeat_join_seconds)
 
 
 class RenderActivities:
-    MAX_ATTEMPTS = 3
-
     def __init__(self, repository, executor):
         self.repository, self.executor = repository, executor
 
     @activity.defn(name='render_image')
-    def render_image(self, request: dict) -> dict:
+    def render_image(self, request: dict, render_policy: dict | None = None) -> dict:
+        render_policy = LEGACY_RENDER_POLICY_V1 if render_policy is None else render_policy
         token = None
         job_id = request.get('job_id', 'invalid') if isinstance(request, dict) else 'invalid'
         try:
+            heartbeat_interval = min(
+                config.jobs.heartbeat_interval_seconds,
+                render_policy['heartbeat_seconds'] / config.jobs.heartbeat_renew_divisor,
+            )
             snapshot = JobRequest.from_dict(request).to_dict()
             while True:
                 try:
@@ -86,11 +91,11 @@ class RenderActivities:
                     if activity.is_cancelled():
                         raise LostExecution('Cancelled while waiting for an execution lease')
                     activity.heartbeat({'job_id': job_id, 'stage': 'waiting_for_execution_lease'})
-                    time.sleep(2)
+                    time.sleep(min(config.jobs.claim_wait_seconds, heartbeat_interval))
             if claim['already_completed']:
                 return claim['result']
             token = claim['token']
-            with LeaseHeartbeat(self.repository, job_id, token) as heartbeat:
+            with LeaseHeartbeat(self.repository, job_id, token, interval=heartbeat_interval) as heartbeat:
                 reference = self.executor.execute(snapshot, token, heartbeat.progress)
                 heartbeat.check()
             reference = self.repository.complete(job_id, token, reference)
@@ -105,7 +110,7 @@ class RenderActivities:
                 retryable = True
             attempt = activity.info().attempt
             if token is not None:
-                if retryable and attempt < self.MAX_ATTEMPTS:
+                if retryable and attempt < render_policy['maximum_attempts']:
                     self.repository.retry_execution(job_id, token, error)
                 else:
                     self.repository.fail(job_id, token, error)

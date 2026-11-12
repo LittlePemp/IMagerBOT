@@ -11,10 +11,13 @@ import json
 import os
 import re
 import secrets
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from imager_config.loader import CONFIG_OVERRIDE_VARIABLE, DEFAULT_CONFIG_PATH, config
 
 
 def parse_env(path):
@@ -46,9 +49,7 @@ def ssha(password, salt=None):
 
 
 def default_data_root(project_root):
-    if os.name == 'nt' and Path('E:/').is_dir():
-        return Path('E:/IMagerBOT-1-runtime/data')
-    return project_root / '.local' / 'data'
+    return project_root / config.paths.data_root
 
 
 def dotenv_literal(value):
@@ -59,15 +60,16 @@ def dotenv_literal(value):
     return "'" + text.replace("'", "\\'") + "'"
 
 
-def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=None, rotate_ui=False):
+def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, rotate_ui=False):
     project_root = Path(project_root).resolve()
-    env_path = project_root / 'infra' / '.env'
+    env_path = project_root / config.paths.compose_env
     values = parse_env(env_path)
-    existing_bot = parse_env(project_root / 'telegram_bot' / '.env')
-    secret_root = project_root / '.local' / 'secrets'
+    existing_bot = parse_env(project_root / config.paths.legacy_bot_env)
+    secret_root = project_root / config.paths.secrets_root
     secret_root.mkdir(parents=True, exist_ok=True)
-    credential_path = secret_root / 'ui-credentials.json'
-    auth_path = secret_root / 'temporal-ui.htpasswd'
+    credential_path = secret_root / config.paths.ui_credentials
+    auth_path = secret_root / config.paths.ui_password_hash
+    ui_user = config.auth.ui_username if ui_user is None else ui_user
 
     if data_root is None:
         configured_data_root = values.get('IMAGER_DATA_ROOT')
@@ -76,13 +78,17 @@ def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=Non
             if not data_root.is_absolute():
                 # Compose resolves this environment path from infra/, regardless
                 # of the directory from which setup was invoked.
-                data_root = project_root / 'infra' / data_root
+                data_root = env_path.parent / data_root
         else:
             data_root = default_data_root(project_root)
     data_root = Path(data_root).resolve()
     if data_root == Path(data_root.anchor):
         raise ValueError('Use a dedicated project data directory, not a drive/filesystem root')
-    for directory in ('mongo', 'minio', 'temporal', 'scratch', 'bot-scratch', 'client-tmp'):
+    for directory in (
+        config.paths.mongo_directory, config.paths.minio_directory, config.paths.temporal_directory,
+        config.paths.worker_scratch_directory, config.paths.bot_scratch_directory,
+        config.paths.client_temp_directory,
+    ):
         (data_root / directory).mkdir(parents=True, exist_ok=True)
 
     if credential_path.is_file() and not rotate_ui:
@@ -92,9 +98,9 @@ def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=Non
             raise ValueError('UI password metadata is missing; use --rotate-ui to replace the password explicitly')
         if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', ui_user):
             raise ValueError('UI username must contain 1-64 letters, digits, dot, dash or underscore')
-        password = ui_password if ui_password is not None else secrets.token_urlsafe(24)
-        if len(password) < 16 or '\n' in password or '\r' in password:
-            raise ValueError('UI password must contain at least 16 characters and no newlines')
+        password = ui_password if ui_password is not None else secrets.token_urlsafe(config.auth.ui_password_random_bytes)
+        if len(password) < config.auth.ui_password_min_length or '\n' in password or '\r' in password:
+            raise ValueError(f'UI password must contain at least {config.auth.ui_password_min_length} characters and no newlines')
         credential = {'username': ui_user, 'password': password}
         credential_path.write_text(json.dumps(credential, indent=2) + '\n', encoding='utf-8')
     if rotate_ui or not auth_path.is_file():
@@ -109,15 +115,33 @@ def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=Non
     values.update({
         'IMAGER_DATA_ROOT': data_root.as_posix(),
         'IMAGER_SECRETS_ROOT': secret_root.as_posix(),
-        'MONGO_PASSWORD': configured_secret('MONGO_PASSWORD', 30),
-        'MINIO_ACCESS_KEY': configured_secret('MINIO_ACCESS_KEY', 15),
-        'MINIO_SECRET_KEY': configured_secret('MINIO_SECRET_KEY', 30),
-        'TEMPORAL_UI_PORT': values.get('TEMPORAL_UI_PORT', '8088'),
-        'MINIO_CONSOLE_PORT': values.get('MINIO_CONSOLE_PORT', '9001'),
+        'MONGO_PASSWORD': configured_secret('MONGO_PASSWORD', config.auth.mongo_password_random_bytes),
+        'MINIO_ACCESS_KEY': configured_secret('MINIO_ACCESS_KEY', config.auth.minio_access_random_bytes),
+        'MINIO_SECRET_KEY': configured_secret('MINIO_SECRET_KEY', config.auth.minio_secret_random_bytes),
+        'TEMPORAL_UI_PORT': values.get('TEMPORAL_UI_PORT') or str(config.deployment.temporal_ui_port),
+        'MINIO_CONSOLE_PORT': values.get('MINIO_CONSOLE_PORT') or str(config.deployment.minio_console_port),
         'API_TOKEN': values.get('API_TOKEN') or existing_bot.get('API_TOKEN', existing_bot.get('api_token', '')),
         'TELEGRAM_ADMIN_IDS': values.get('TELEGRAM_ADMIN_IDS') or existing_bot.get('TELEGRAM_ADMIN_IDS', existing_bot.get('telegram_admin_ids', '')),
-        'IMAGER_IMPORT_ROOT': values.get('IMAGER_IMPORT_ROOT') or (project_root / 'imager' / 'files' / 'groups').as_posix(),
+        'IMAGER_IMPORT_ROOT': values.get('IMAGER_IMPORT_ROOT') or (project_root / 'imager' / config.paths.image_groups).as_posix(),
+        'IMAGER_MONGO_DATA_PATH': (data_root / config.paths.mongo_directory).as_posix(),
+        'IMAGER_MINIO_DATA_PATH': (data_root / config.paths.minio_directory).as_posix(),
+        'IMAGER_TEMPORAL_DATA_PATH': (data_root / config.paths.temporal_directory).as_posix(),
+        'IMAGER_WORKER_SCRATCH_PATH': (data_root / config.paths.worker_scratch_directory).as_posix(),
+        'IMAGER_BOT_SCRATCH_PATH': (data_root / config.paths.bot_scratch_directory).as_posix(),
+        'IMAGER_TEMPORAL_UI_AUTH_FILE': auth_path.as_posix(),
+        'IMAGER_TEMPORAL_NAMESPACE': config.temporal.namespace,
     })
+    selected_config = os.environ.get(CONFIG_OVERRIDE_VARIABLE)
+    if selected_config:
+        selected_config = Path(selected_config).resolve()
+    elif values.get('IMAGER_CONFIG_SOURCE'):
+        selected_config = Path(values['IMAGER_CONFIG_SOURCE'])
+        if not selected_config.is_absolute():
+            selected_config = env_path.parent / selected_config
+        selected_config = selected_config.resolve()
+    else:
+        selected_config = DEFAULT_CONFIG_PATH
+    values['IMAGER_CONFIG_SOURCE'] = selected_config.as_posix()
     env_path.parent.mkdir(parents=True, exist_ok=True)
     # Single quotes preserve spaces and prevent Compose expansion of secret $.
     env_path.write_text(
@@ -125,7 +149,7 @@ def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=Non
             f'{key}={dotenv_literal(value)}\n' for key, value in values.items()
         ), encoding='utf-8',
     )
-    readable = secret_root / 'local-credentials.txt'
+    readable = secret_root / config.paths.readable_credentials
     readable.write_text(
         f'Temporal UI: http://127.0.0.1:{values["TEMPORAL_UI_PORT"]}\n'
         f'Username: {credential["username"]}\nPassword: {credential["password"]}\n\n'
@@ -146,11 +170,11 @@ def prepare(project_root=ROOT, data_root=None, ui_user='imager', ui_password=Non
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-root', type=Path)
-    parser.add_argument('--ui-user', default='imager')
+    parser.add_argument('--ui-user')
     parser.add_argument('--prompt-ui-password', action='store_true')
     parser.add_argument('--rotate-ui', action='store_true')
     args = parser.parse_args()
-    password = getpass.getpass('Temporal UI password (at least 16 characters): ') if args.prompt_ui_password else None
+    password = getpass.getpass(f'Temporal UI password (at least {config.auth.ui_password_min_length} characters): ') if args.prompt_ui_password else None
     result = prepare(
         data_root=args.data_root, ui_user=args.ui_user,
         ui_password=password, rotate_ui=args.rotate_ui,

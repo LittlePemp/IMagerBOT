@@ -4,7 +4,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 
 SETUP = Path(__file__).resolve().parents[3] / 'infra' / 'setup.py'
@@ -60,3 +62,24 @@ class TestDeploymentSetup(unittest.TestCase):
             self.assertEqual(result['data'], expected)
             self.assertEqual(setup.parse_env(root / 'infra/.env')['IMAGER_DATA_ROOT'], expected.as_posix())
             self.assertTrue((expected / 'client-tmp').is_dir())
+
+    def test_toml_paths_and_auth_filenames_are_used_in_generated_compose_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            configured = replace(setup.config, paths=replace(
+                setup.config.paths, data_root='state', secrets_root='.keys',
+                ui_credentials='ui.json', ui_password_hash='ui.auth',
+                readable_credentials='credentials.txt', mongo_directory='database',
+                worker_scratch_directory='worker-temp', bot_scratch_directory='bot-temp',
+            ), deployment=replace(setup.config.deployment, temporal_ui_port=18088))
+            with patch.object(setup, 'config', configured):
+                result = setup.prepare(root)
+            self.assertEqual(result['data'], root / 'state')
+            self.assertTrue((root / '.keys/ui.json').is_file())
+            self.assertTrue((root / '.keys/ui.auth').is_file())
+            self.assertEqual(result['credentials'], root / '.keys/credentials.txt')
+            env = setup.parse_env(result['env'])
+            self.assertEqual(env['TEMPORAL_UI_PORT'], '18088')
+            self.assertEqual(env['IMAGER_MONGO_DATA_PATH'], (root / 'state/database').as_posix())
+            self.assertEqual(env['IMAGER_WORKER_SCRATCH_PATH'], (root / 'state/worker-temp').as_posix())
+            self.assertEqual(env['IMAGER_TEMPORAL_UI_AUTH_FILE'], (root / '.keys/ui.auth').as_posix())

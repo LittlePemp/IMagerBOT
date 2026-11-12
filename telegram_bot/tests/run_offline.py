@@ -26,20 +26,26 @@ def main():
         str(root), str(repository), str(root / '.packages'),
         str(repository / 'imager' / '.packages'),
     ]
+    from imager_config.loader import config
     configuration = types.ModuleType('settings')
     configuration.settings = SimpleNamespace(
         tzinfo=timezone.utc,
         mongodb_uri='mongodb://127.0.0.1:1',
         imager_database_name='offline',
-        generation_default_result_size=120, generation_default_cell_size=40,
-        generation_default_noise_level=15, generation_default_alpha_channel=30,
-        generation_default_insertion_format='crop',
-        generation_result_size_min=1, generation_result_size_max=300,
-        generation_cell_size_min=1, generation_cell_size_max=200,
-        generation_noise_level_min=0, generation_noise_level_max=100,
-        generation_estimated_jpeg_bytes_per_pixel=1.0,
-        telegram_max_document_size_bytes=47185920,
-        regular_user_upload_limit=5,
+        generation_default_result_size=config.generation.result_size,
+        generation_default_cell_size=config.generation.cell_size,
+        generation_default_noise_level=config.generation.noise_level,
+        generation_default_alpha_channel=config.generation.alpha_channel,
+        generation_default_insertion_format=config.generation.insertion_format,
+        generation_result_size_min=config.bot.result_size_min,
+        generation_result_size_max=config.bot.result_size_max,
+        generation_cell_size_min=config.bot.cell_size_min,
+        generation_cell_size_max=config.bot.cell_size_max,
+        generation_noise_level_min=config.bot.noise_min,
+        generation_noise_level_max=config.bot.noise_max,
+        generation_estimated_jpeg_bytes_per_pixel=config.render.estimated_jpeg_bytes_per_pixel,
+        telegram_max_document_size_bytes=config.render.max_output_bytes,
+        regular_user_upload_limit=config.bot.regular_user_upload_limit,
     )
     sys.modules['settings'] = configuration
     loggers = types.ModuleType('src.utils.loggers')

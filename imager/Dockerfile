@@ -7,6 +7,8 @@ COPY imager/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY imager_contracts /app/imager_contracts
+COPY imager_config /app/imager_config
+COPY config /app/config
 COPY imager /app/imager
 
 CMD ["python", "-m", "src.presentation.temporal.worker"]

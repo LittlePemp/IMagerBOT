@@ -5,12 +5,13 @@ from settings import settings
 from src.application.image_builder.commands.generate_image import GenerateImageCommand
 from src.application.image_builder.mediator import mediator
 from src.presentation.api.schemas import GenerateImageResponse
+from imager_config.loader import config
 from src.shared_kernel.loggers import presentation_logger
 
 
 # The generation handler owns the process-wide generation gate. A single HTTP
 # worker keeps waiting jobs from occupying executor threads behind that gate.
-queue = asyncio.Queue(maxsize=getattr(settings, 'api_queue_maxsize', 8))
+queue = asyncio.Queue(maxsize=getattr(settings, 'api_queue_maxsize', config.legacy.api_queue_maxsize))
 _worker_tasks: list[asyncio.Task] = []
 _accepting_requests = False
 
@@ -80,7 +81,7 @@ def start_workers():
     if any(not task.done() for task in _worker_tasks):
         return
     _worker_tasks.clear()
-    queue = asyncio.Queue(maxsize=getattr(settings, 'api_queue_maxsize', 8))
+    queue = asyncio.Queue(maxsize=getattr(settings, 'api_queue_maxsize', config.legacy.api_queue_maxsize))
     _accepting_requests = True
     _start_worker()
 
@@ -105,7 +106,7 @@ def _start_worker():
 async def stop_workers():
     global _accepting_requests
     _accepting_requests = False
-    timeout = getattr(settings, 'api_shutdown_timeout_seconds', 30)
+    timeout = getattr(settings, 'api_shutdown_timeout_seconds', config.legacy.api_shutdown_timeout_seconds)
     try:
         await asyncio.wait_for(queue.join(), timeout=timeout)
     except asyncio.TimeoutError:

@@ -5,9 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
+from imager_config.loader import load_config
+from imager_contracts.protocol import JPEG_CONTENT_TYPE, SEED_UPPER_BOUND
 from src.application.image_builder.services.object_render import ObjectRenderExecutor, RenderRejected
 from src.infrastructure.object_storage.catalog import MinioCatalogProvider, import_local_catalog
 from src.infrastructure.object_storage.minio_store import (
@@ -192,4 +195,67 @@ class TestMinioStorage(unittest.TestCase):
         executor = ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store))
         with self.assertRaises(RenderRejected):
             executor.execute({'job_id': 'job', 'parameters': {}}, 'token')
+        self.assertEqual(self.client.get_count, 0)
+
+    def test_configured_result_filename_and_key_keep_jpeg_encoding_consistent(self):
+        group = self.prepare_catalog()
+        source = self.root / 'source.png'
+        cv2.imwrite(str(source), np.full((24, 32, 3), 100, dtype=np.uint8))
+        reference = self.store.upload_file(source, 'uploads/job/source.png')
+        request = dict(job_id='job', source=reference, catalog_manifest=group['manifest'], seed=5,
+                       parameters=dict(group_name='cats', insertion_format='crop', alpha_channel=0,
+                                       noise_level=0, result_size=4, cell_size=3))
+        override = self.root / 'override.toml'
+        override.write_text(
+            '[storage]\nresult_filename="completed.jpeg"\n'
+            'result_key_template="renders/{job_id}/{execution_token}/{result_filename}"\n'
+            'source_filename="input.data"\n[render]\njpeg_quality=84\n',
+            encoding='utf-8',
+        )
+        with patch('src.application.image_builder.services.object_render.config', load_config(override)):
+            executor = ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store))
+            published = executor.execute(request, 'attempt')
+        self.assertEqual(executor.jpeg_quality, 84)
+        self.assertEqual(published['key'], 'renders/job/attempt/completed.jpeg')
+        self.assertEqual(published['content_type'], JPEG_CONTENT_TYPE)
+        encoded = self.client.objects[published['bucket'], published['key']][0]
+        self.assertTrue(encoded.startswith(b'\xff\xd8'))
+        self.assertEqual(cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR).shape,
+                         (9, 12, 3))
+
+    def test_changed_catalog_templates_preserve_old_pinned_manifest_references(self):
+        old = self.prepare_catalog()
+        override = self.root / 'catalog-override.toml'
+        override.write_text(
+            '[storage]\ncatalog_image_key_template="assets/{sha256}{extension}"\n'
+            'catalog_manifest_key_template="indexes/{group_id}/{sha256}.json"\n',
+            encoding='utf-8',
+        )
+        changed = load_config(override)
+        with patch('src.infrastructure.object_storage.catalog.config', changed):
+            provider = MinioCatalogProvider(self.store)
+            catalog = provider.for_manifest(old['manifest'], 'cats')
+            selected = catalog.find_closest_metadata([(30, 90, 180)], 'cats').value[0]
+            self.assertTrue(catalog.get_cell_image(selected))
+            new = import_local_catalog(
+                self.root / 'cats', self.store, Groups(), group_name='new-cats',
+            )[0]
+            self.assertTrue(new['manifest']['key'].startswith('indexes/'))
+            catalog = provider.for_manifest(new['manifest'], 'new-cats')
+            selected = catalog.find_closest_metadata([(30, 90, 180)], 'new-cats').value[0]
+            self.assertTrue(selected.object_ref['key'].startswith('assets/'))
+            self.assertTrue(catalog.get_cell_image(selected))
+        # Existing manifests remain readable even after another process starts
+        # with a different current storage layout.
+        catalog = MinioCatalogProvider(self.store).for_manifest(new['manifest'], 'new-cats')
+        selected = catalog.find_closest_metadata([(30, 90, 180)], 'new-cats').value[0]
+        self.assertTrue(catalog.get_cell_image(selected))
+
+    def test_seed_policy_matches_wire_contract_before_infrastructure_calls(self):
+        executor = ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store))
+        parameters = dict(group_name='cats', insertion_format='crop', alpha_channel=0,
+                          noise_level=0, result_size=4, cell_size=3)
+        for seed in (-1, True, SEED_UPPER_BOUND):
+            with self.subTest(seed=seed), self.assertRaises(RenderRejected):
+                executor.execute({'job_id': 'job', 'parameters': parameters, 'seed': seed}, 'token')
         self.assertEqual(self.client.get_count, 0)

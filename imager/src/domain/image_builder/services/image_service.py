@@ -6,6 +6,7 @@ configure_decoder_limits()
 
 import cv2
 import numpy as np
+from imager_config.loader import config
 from scipy.spatial import KDTree
 from src.shared_kernel.result import Result
 
@@ -43,12 +44,16 @@ class ImageService:
     @staticmethod
     def validate_image(
         image: np.ndarray,
-        min_size: tuple[int, int] = (20, 20),
-        max_size: tuple[int, int] = (4000, 4000),
+        min_size: tuple[int, int] | None = None,
+        max_size: tuple[int, int] | None = None,
         aspect_ratio_limits: tuple[float, float] | None = None,
     ) -> Result:
         """Check decoded dimensions; source and library policies stay separate."""
         try:
+            if min_size is None:
+                min_size = (config.image.min_width, config.image.min_height)
+            if max_size is None:
+                max_size = (config.image.max_width, config.image.max_height)
             if not isinstance(image, np.ndarray) or image.size == 0:
                 raise ValueError('Image must be a non-empty pixel array')
             if image.ndim not in (2, 3):

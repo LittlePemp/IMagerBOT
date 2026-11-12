@@ -1,6 +1,7 @@
 import os
 from collections import OrderedDict, defaultdict
 from threading import RLock
+from imager_config.loader import config as runtime_config
 
 import numpy as np
 from pymongo.collection import Collection
@@ -62,8 +63,8 @@ class CellRepository(IRepository):
     def load_data_from_mongo(self):
         """Load metadata only: decoding here used to load every original twice."""
         for index, config in enumerate(self.mongo_collection.find({})):
-            if index % 128 == 0:
-                require_memory(32_000_000)
+            if index % runtime_config.catalog.validation_interval == 0:
+                require_memory(runtime_config.memory.catalog_check_reserve_bytes)
             try:
                 path = self.file_repository.resolve_image_path(config['relative_file_path'])
                 if not os.path.isfile(path):
@@ -90,7 +91,7 @@ class CellRepository(IRepository):
                 for metadata in cells.values():
                     if self._cache_bytes + previous_size > CACHE_LIMIT_BYTES:
                         return
-                    if current_rss_bytes() + 256_000_000 + MEMORY_HEADROOM_BYTES > MEMORY_LIMIT_BYTES:
+                    if current_rss_bytes() + runtime_config.memory.decode_reserve_bytes + MEMORY_HEADROOM_BYTES > MEMORY_LIMIT_BYTES:
                         return
                     result = self.get_cell_image(metadata)
                     if not result.is_success:
@@ -118,10 +119,10 @@ class CellRepository(IRepository):
                 self._image_cache.move_to_end(path)
                 return Result.Success(image)
             # Decode plus uint16/alpha normalization can temporarily hold several arrays.
-            decode_reserve = 256_000_000
+            decode_reserve = runtime_config.memory.decode_reserve_bytes
             while (self._image_cache and
                    current_rss_bytes() + decode_reserve + MEMORY_HEADROOM_BYTES > MEMORY_LIMIT_BYTES):
-                self.trim_image_cache(max(0, self._cache_bytes - 32_000_000))
+                self.trim_image_cache(max(0, self._cache_bytes - runtime_config.memory.cache_eviction_step_bytes))
             if current_rss_bytes() + decode_reserve + MEMORY_HEADROOM_BYTES > MEMORY_LIMIT_BYTES:
                 message = 'Not enough memory to decode a catalog image within the process budget'
                 db_logger.error(message)

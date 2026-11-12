@@ -7,22 +7,24 @@ import os
 import threading
 from contextlib import contextmanager
 
+from imager_config.loader import config
 
-MEMORY_LIMIT_BYTES = 1_000_000_000
-MEMORY_HEADROOM_BYTES = 64_000_000
-CACHE_LIMIT_BYTES = 256_000_000
-PREPARED_CACHE_LIMIT_BYTES = 64_000_000
-MAX_SOURCE_FILE_BYTES = 64_000_000
-MAX_SOURCE_PIXELS = 16_000_000
-MAX_OUTPUT_PIXELS = 48_000_000
-MAX_CELLS = 250_000
+
+MEMORY_LIMIT_BYTES = config.limits.memory_bytes
+MEMORY_HEADROOM_BYTES = config.limits.memory_headroom_bytes
+CACHE_LIMIT_BYTES = config.limits.original_cache_bytes
+PREPARED_CACHE_LIMIT_BYTES = config.limits.prepared_cache_bytes
+MAX_SOURCE_FILE_BYTES = config.limits.source_file_bytes
+MAX_SOURCE_PIXELS = config.limits.source_pixels
+MAX_OUTPUT_PIXELS = config.limits.output_pixels
+MAX_CELLS = config.limits.cells
 
 
 def configure_decoder_limits():
     """Call before importing OpenCV so oversized inputs fail before decoding."""
     for name, ceiling in (
-        ('OPENCV_IO_MAX_IMAGE_WIDTH', 4000),
-        ('OPENCV_IO_MAX_IMAGE_HEIGHT', 4000),
+        ('OPENCV_IO_MAX_IMAGE_WIDTH', config.limits.decoder_width),
+        ('OPENCV_IO_MAX_IMAGE_HEIGHT', config.limits.decoder_height),
         ('OPENCV_IO_MAX_IMAGE_PIXELS', MAX_SOURCE_PIXELS),
     ):
         try:

@@ -1,4 +1,6 @@
 from src.shared_kernel.result import Result
+from imager_config.loader import config
+from imager_contracts.protocol import PERCENT_MAX
 
 from ..errors.entities_errors import EntitiesErrorMessages
 
@@ -30,7 +32,7 @@ class AlphaChannel:
     def create(value) -> Result:
         if type(value) is not int:
             return EntitiesErrorMessages.alpha_channel_must_be_an_integer()
-        if not (0 <= value <= 100):
+        if not (0 <= value <= PERCENT_MAX):
             return EntitiesErrorMessages.alpha_channel_must_be_in_range()
         return Result.Success(AlphaChannel(value))
 
@@ -49,7 +51,7 @@ class NoiseLevel:
     def create(value) -> Result:
         if type(value) is not int:
             return EntitiesErrorMessages.noise_level_must_be_an_integer()
-        if not (0 <= value <= 100):
+        if not (0 <= value <= PERCENT_MAX):
             return EntitiesErrorMessages.noise_level_must_be_in_range()
         return Result.Success(NoiseLevel(value))
 
@@ -61,7 +63,7 @@ class NoiseLevel:
 
 
 class CellSize:
-    MAX_VALUE = 2000
+    MAX_VALUE = config.limits.cell_size
 
     def __init__(self, value):
         self.value = value
@@ -84,7 +86,7 @@ class CellSize:
 
 
 class ResultSize:
-    MAX_VALUE = 1000
+    MAX_VALUE = config.limits.result_size
 
     def __init__(self, value):
         self.value = value

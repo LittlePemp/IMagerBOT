@@ -8,6 +8,9 @@ from aiogram import Dispatcher, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from imager_config.loader import config
+from imager_contracts.protocol import TELEGRAM_JOB_ID_NAMESPACE
+
 try:
     from aiogram.types import ReactionTypeEmoji
 except ImportError:  # pragma: no cover
@@ -304,7 +307,8 @@ async def select_generation_mode(callback: CallbackQuery, state: FSMContext, uow
         await _show_image_sizes(callback, state, uow)
         return
     await callback.message.edit_text(
-        "Ручной ввод включён. Введите количество картинок по наибольшей стороне.\nРекомендуемое значение: 120",
+        f"Ручной ввод включён. Введите количество картинок по наибольшей стороне.\n"
+        f"Рекомендуемое значение: {settings.generation_default_result_size}",
         reply_markup=upload_image_keyboard().as_markup(),
     )
     await state.set_state(ImageGenerationStates.waiting_manual_image_size)
@@ -417,7 +421,7 @@ async def select_image_group(callback: CallbackQuery, state: FSMContext, uow: Mo
 
 def _generation_job_id(message) -> str:
     # Telegram update redelivery must address the same logical generation.
-    return str(uuid5(NAMESPACE_URL, f"imager:telegram:{message.chat.id}:{message.message_id}"))
+    return str(uuid5(NAMESPACE_URL, f"{TELEGRAM_JOB_ID_NAMESPACE}{message.chat.id}:{message.message_id}"))
 
 
 async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWork, user: User):
@@ -464,9 +468,11 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
         photo = message.photo[-1]
         file = await message.bot.get_file(photo.file_id)
         # Local files are bounded transfer buffers, never shared with the core.
-        with tempfile.TemporaryDirectory(prefix="imager-upload-") as directory:
-            source_path = Path(directory) / "source.jpg"
-            await message.bot.download_file(file.file_path, str(source_path))
+        with tempfile.TemporaryDirectory(prefix=config.storage.upload_temp_prefix) as directory:
+            source_path = Path(directory) / config.storage.upload_filename
+            await message.bot.download_file(
+                file.file_path, str(source_path), timeout=config.bot.download_timeout_seconds,
+            )
             source = await imager_service.upload_source(source_path, job_id)
 
         now = datetime.now(settings.tzinfo)
@@ -505,7 +511,7 @@ async def receive_image(message: Message, state: FSMContext, uow: MongoUnitOfWor
                 "reply_to_message_id": message.message_id,
                 "user_id": user.telegram_id,
                 "history_record_id": history_record_id,
-                "display_name": f"imager_{job_id}",
+                "display_name": f"{config.render.output_stem}_{job_id}",
                 "generation_mode": data.get("generation_mode", GENERATION_MODE_PRESETS),
             },
         )

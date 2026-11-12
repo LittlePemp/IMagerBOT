@@ -12,6 +12,7 @@ from src.application.image_builder.queries.get_list_image_groups import GetListI
 from src.presentation.api.schemas import GenerateImageRequest
 from src.presentation.rabbitmq.rpc_journal import RpcJournal
 from src.shared_kernel.error_handler import error_from_exception
+from imager_config.loader import config
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -25,8 +26,8 @@ class RetryableRequestError(Exception):
 def _journal() -> RpcJournal:
     return RpcJournal(
         Path(settings.file_path_prefix) / settings.generated_images_path,
-        ttl_seconds=getattr(settings, 'rpc_result_ttl_seconds', 86400),
-        max_entries=getattr(settings, 'rpc_result_max_entries', 1000),
+        ttl_seconds=getattr(settings, 'rpc_result_ttl_seconds', config.legacy.rpc_result_ttl_seconds),
+        max_entries=getattr(settings, 'rpc_result_max_entries', config.legacy.rpc_result_max_entries),
     )
 
 
@@ -130,7 +131,7 @@ def _retry_count(message) -> int:
     try:
         return max(0, int((message.headers or {}).get('x-imager-retry', 0)))
     except (TypeError, ValueError, OverflowError):
-        return getattr(settings, 'rabbitmq_max_retries', 2)
+        return getattr(settings, 'rabbitmq_max_retries', config.legacy.rabbitmq_max_retries)
 
 
 async def _process_message(message: aio_pika.IncomingMessage, exchange: aio_pika.abc.AbstractExchange):
@@ -168,7 +169,7 @@ async def _process_message(message: aio_pika.IncomingMessage, exchange: aio_pika
         presentation_logger.exception(
             f'RPC failed: request_id={request_id}, attempt={attempt}, retryable={retryable}'
         )
-        if retryable and attempt < getattr(settings, 'rabbitmq_max_retries', 2):
+        if retryable and attempt < getattr(settings, 'rabbitmq_max_retries', config.legacy.rabbitmq_max_retries):
             try:
                 await _retry_message(message, exchange, attempt)
             except Exception:
@@ -200,7 +201,7 @@ async def _process_message(message: aio_pika.IncomingMessage, exchange: aio_pika
         presentation_logger.exception(f'RPC response delivery failed: request_id={request_id}')
         if not completed_generation:
             attempt = _retry_count(message)
-            if attempt < getattr(settings, 'rabbitmq_max_retries', 2):
+            if attempt < getattr(settings, 'rabbitmq_max_retries', config.legacy.rabbitmq_max_retries):
                 try:
                     await _retry_message(message, exchange, attempt)
                 except Exception:

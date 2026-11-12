@@ -3,10 +3,13 @@ import ast
 import asyncio
 import time
 import unittest
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from imager_config.loader import config
+from imager_contracts.workflow_versions import LEGACY_RENDER_POLICY_V1, legacy_execution_policy_v1
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +33,7 @@ def load(relative, namespace):
 
 def dispatcher():
     return load('src/presentation/temporal/dispatcher.py', {
-        'asyncio': asyncio, 'time': time,
+        'asyncio': asyncio, 'time': time, 'config': config,
         'WorkflowAlreadyStartedError': AlreadyStarted,
         'WorkflowIDReusePolicy': SimpleNamespace(REJECT_DUPLICATE='reject-duplicate'),
         'settings': SimpleNamespace(temporal_task_queue='imager-render'),
@@ -41,9 +44,14 @@ def dispatcher():
 def event():
     return {
         'job_id': 'job-1', 'dispatch_token': 'owner-1',
+        'workflow_id': 'imager:job-1', 'execution_policy': policy(),
         'request': {'job_id': 'job-1', 'source': {'key': 'uploads/source.jpg'},
                     'parameters': {'cell_size': 40}, 'catalog_manifest': {'key': 'manifest.json'}},
     }
+
+
+def policy():
+    return {'render': asdict(config.temporal.render), 'failure': asdict(config.temporal.failure)}
 
 
 class TestTemporalDispatch(unittest.IsolatedAsyncioTestCase):
@@ -59,7 +67,7 @@ class TestTemporalDispatch(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await module['dispatch_once'](repository, client))
         repository.validate_dispatch.assert_called_once_with(event())
         repository.mark_dispatched.assert_called_once_with('job-1', 'owner-1', 'imager:job-1')
-        self.assertEqual(client.start_workflow.call_args.args[1], event()['request'])
+        self.assertEqual(client.start_workflow.call_args.kwargs['args'], [event()['request'], policy()])
         self.assertEqual(client.start_workflow.call_args.kwargs['id_reuse_policy'], 'reject-duplicate')
         repository.defer_dispatch.assert_not_called()
 
@@ -121,18 +129,19 @@ class TestWorkflowFinalization(unittest.IsolatedAsyncioTestCase):
         module = load('src/presentation/temporal/workflows.py', {
             'workflow': sdk, 'ActivityError': ActivityFailed,
             'timedelta': timedelta, 'RetryPolicy': lambda **values: values,
+            'legacy_execution_policy_v1': legacy_execution_policy_v1,
         })
         return sdk, module['GenerateImageWorkflow']()
 
     async def test_success_needs_no_failure_activity(self):
         sdk, workflow = self.workflow([{'key': 'result.jpg'}])
-        self.assertEqual(await workflow.run({'job_id': 'job-1'}), {'key': 'result.jpg'})
+        self.assertEqual(await workflow.run({'job_id': 'job-1'}, policy()), {'key': 'result.jpg'})
         self.assertEqual(sdk.execute_activity.await_count, 1)
 
     async def test_timeout_records_final_failure_and_keeps_workflow_failed(self):
         sdk, workflow = self.workflow([ActivityFailed('timeout'), {'status': 'failed'}])
         with self.assertRaises(ActivityFailed):
-            await workflow.run({'job_id': 'job-1'})
+            await workflow.run({'job_id': 'job-1'}, policy())
         self.assertEqual(sdk.execute_activity.call_args.args[0], 'record_job_failure')
         self.assertEqual(sdk.execute_activity.call_args.args[1]['job_id'], 'job-1')
         self.assertEqual(
@@ -143,4 +152,48 @@ class TestWorkflowFinalization(unittest.IsolatedAsyncioTestCase):
         sdk, workflow = self.workflow([
             ActivityFailed('reply lost'), {'status': 'completed', 'result': {'key': 'winner.jpg'}},
         ])
-        self.assertEqual(await workflow.run({'job_id': 'job-1'}), {'key': 'winner.jpg'})
+        self.assertEqual(await workflow.run({'job_id': 'job-1'}, policy()), {'key': 'winner.jpg'})
+
+    async def test_saved_policy_controls_timeouts_and_retry_cutoff(self):
+        sdk, workflow = self.workflow([{'key': 'result.jpg'}])
+        saved = policy()
+        saved['render']['start_to_close_seconds'] = 123.0
+        saved['render']['maximum_attempts'] = 7
+        await workflow.run({'job_id': 'job-1'}, saved)
+        call = sdk.execute_activity.call_args
+        self.assertEqual(call.kwargs['start_to_close_timeout'], timedelta(seconds=123))
+        self.assertEqual(call.kwargs['retry_policy']['maximum_attempts'], 7)
+        self.assertEqual(call.kwargs['args'], [{'job_id': 'job-1'}, saved['render']])
+
+    async def test_legacy_one_argument_history_keeps_original_command_payload_and_timers(self):
+        sdk, workflow = self.workflow([{'key': 'old-result.jpg'}])
+        request = {'job_id': 'old-job'}
+        await workflow.run(request)
+        call = sdk.execute_activity.call_args
+        self.assertEqual(call.args, ('render_image',))
+        self.assertEqual(call.kwargs['arg'], request)
+        self.assertNotIn('args', call.kwargs)
+        self.assertEqual(call.kwargs['start_to_close_timeout'], timedelta(seconds=900))
+        self.assertEqual(call.kwargs['schedule_to_close_timeout'], timedelta(seconds=86400))
+        self.assertEqual(call.kwargs['heartbeat_timeout'], timedelta(seconds=30))
+        retry = call.kwargs['retry_policy']
+        self.assertEqual(retry['initial_interval'], timedelta(seconds=2))
+        self.assertEqual(retry['maximum_interval'], timedelta(seconds=30))
+        self.assertEqual(retry['maximum_attempts'], 3)
+
+    async def test_legacy_failure_compensation_keeps_original_policy(self):
+        sdk, workflow = self.workflow([ActivityFailed('old timeout'), {'status': 'failed'}])
+        with self.assertRaises(ActivityFailed):
+            await workflow.run({'job_id': 'old-job'})
+        call = sdk.execute_activity.call_args
+        self.assertEqual(call.args[0], 'record_job_failure')
+        self.assertEqual(call.kwargs['start_to_close_timeout'], timedelta(seconds=30))
+        self.assertEqual(call.kwargs['schedule_to_close_timeout'], timedelta(seconds=300))
+        self.assertEqual(call.kwargs['retry_policy']['maximum_attempts'], 5)
+
+    def test_legacy_policy_is_immutable_and_returned_copies_are_detached(self):
+        with self.assertRaises(TypeError):
+            LEGACY_RENDER_POLICY_V1['maximum_attempts'] = 100
+        copy = legacy_execution_policy_v1()
+        copy['render']['maximum_attempts'] = 100
+        self.assertEqual(legacy_execution_policy_v1()['render']['maximum_attempts'], 3)

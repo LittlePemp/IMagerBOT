@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import asdict
+import math
 from uuid import uuid4
 
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from imager_contracts import JobRequest, ObjectRef, make_submission, payload_fingerprint
+from imager_config.loader import config
 
 
 class JobConflict(ValueError):
@@ -26,9 +29,9 @@ class MongoJobRepository:
     multi-document transaction is implied, and no file is a shared job state.
     """
 
-    def __init__(self, collection, *, lease_seconds=60, clock=None):
+    def __init__(self, collection, *, lease_seconds=None, clock=None):
         self.collection = collection
-        self.lease_seconds = lease_seconds
+        self.lease_seconds = config.jobs.execution_lease_seconds if lease_seconds is None else lease_seconds
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def ensure_indexes(self):
@@ -67,8 +70,29 @@ class MongoJobRepository:
         )
         if job is None:
             return None
+        if 'execution_policy' not in job:
+            # Upgrade a legacy inbox once, before Temporal can accept its start.
+            # A retry after config changes must reuse the same policy snapshot.
+            self.collection.update_one(
+                {'_id': job['_id'], 'execution_policy': {'$exists': False}},
+                {'$set': {'execution_policy': {
+                    'render': asdict(config.temporal.render),
+                    'failure': asdict(config.temporal.failure),
+                }}},
+            )
+            job = self.collection.find_one({'_id': job['_id']})
+        workflow_id = job.get('dispatch', {}).get('workflow_id')
+        if not workflow_id:
+            workflow_id = f'{config.temporal.workflow_id_prefix}{job["_id"]}'
+            self.collection.update_one(
+                {'_id': job['_id'], 'dispatch.workflow_id': None},
+                {'$set': {'dispatch.workflow_id': workflow_id}},
+            )
+            job = self.collection.find_one({'_id': job['_id']})
+            workflow_id = job['dispatch']['workflow_id']
         return {'job_id': job['_id'], 'request': job.get('request'),
-                'dispatch_token': token, 'attempts': job['dispatch']['attempts']}
+                'dispatch_token': token, 'attempts': job['dispatch']['attempts'],
+                'execution_policy': job['execution_policy'], 'workflow_id': workflow_id}
 
     def mark_dispatched(self, job_id, token, workflow_id):
         result = self.collection.update_one(
@@ -84,9 +108,28 @@ class MongoJobRepository:
         if (job is None or snapshot['job_id'] != event['job_id']
                 or job.get('payload_hash') != payload_fingerprint(snapshot)):
             raise JobConflict('Inbox payload was modified after submission')
+        policy = event.get('execution_policy')
+        if not isinstance(policy, dict) or set(policy) != {'render', 'failure'}:
+            raise JobConflict('Invalid execution policy snapshot')
+        for name, defaults in (('render', config.temporal.render), ('failure', config.temporal.failure)):
+            values = policy[name]
+            if not isinstance(values, dict) or set(values) != set(asdict(defaults)):
+                raise JobConflict('Invalid execution policy fields')
+            for field, value in values.items():
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                    raise JobConflict('Execution policy values must be finite and positive')
+                if field == 'maximum_attempts' and type(value) is not int:
+                    raise JobConflict('Execution retry count must be an integer')
+            if (values['retry_initial_seconds'] > values['retry_maximum_seconds']
+                    or values['start_to_close_seconds'] > values['schedule_to_close_seconds']):
+                raise JobConflict('Execution policy intervals are inverted')
+        if (policy != job.get('execution_policy')
+                or event.get('workflow_id') != job.get('dispatch', {}).get('workflow_id')):
+            raise JobConflict('Dispatch policy or workflow identity changed after claiming')
         return snapshot
 
-    def unfinished_jobs(self, limit=20):
+    def unfinished_jobs(self, limit=None):
+        limit = config.temporal.dispatcher.reconcile_batch_size if limit is None else limit
         jobs = list(self.collection.find({
             'status': {'$in': ['queued', 'running', 'retrying']},
             'dispatch.state': 'sent',
@@ -96,14 +139,15 @@ class MongoJobRepository:
                 {'_id': job['_id']}, {'$set': {'reconcile_checked_at': self.clock()}},
             )
         return [{'job_id': job['_id'],
-                 'workflow_id': job.get('dispatch', {}).get('workflow_id', f'imager:{job["_id"]}')}
+                 'workflow_id': job.get('dispatch', {}).get('workflow_id',
+                     f'{config.temporal.workflow_id_prefix}{job["_id"]}')}
                 for job in jobs]
 
     def reject_dispatch(self, job_id, token, error):
         result = self.collection.update_one(
             {'_id': job_id, 'dispatch.state': 'claimed', 'dispatch.token': token},
             {'$set': {'dispatch.state': 'rejected', 'status': 'failed',
-                      'error': str(error)[:8192], 'updated_at': self.clock(),
+                      'error': str(error)[:config.jobs.error_max_length], 'updated_at': self.clock(),
                       'completion_outbox': self._completion_event(job_id, 'failed')}},
         )
         return result.matched_count == 1
@@ -112,8 +156,8 @@ class MongoJobRepository:
         now = self.clock()
         result = self.collection.update_one(
             {'_id': job_id, 'dispatch.state': 'claimed', 'dispatch.token': token},
-            {'$set': {'dispatch.state': 'pending', 'dispatch.last_error': str(error)[:8192],
-                      'dispatch.next_attempt_at': now + timedelta(seconds=5), 'updated_at': now}},
+            {'$set': {'dispatch.state': 'pending', 'dispatch.last_error': str(error)[:config.jobs.error_max_length],
+                      'dispatch.next_attempt_at': now + timedelta(seconds=config.jobs.dispatch_retry_seconds), 'updated_at': now}},
         )
         return result.matched_count == 1
 
@@ -181,7 +225,7 @@ class MongoJobRepository:
     def retry_execution(self, job_id, token, error):
         result = self.collection.update_one(
             {'_id': job_id, 'status': 'running', 'execution.token': token},
-            {'$set': {'status': 'retrying', 'error': str(error)[:8192],
+            {'$set': {'status': 'retrying', 'error': str(error)[:config.jobs.error_max_length],
                       'execution.lease_until': self.clock(), 'updated_at': self.clock()}},
         )
         return result.matched_count == 1
@@ -189,7 +233,7 @@ class MongoJobRepository:
     def fail(self, job_id, token, error):
         result = self.collection.update_one(
             {'_id': job_id, 'status': 'running', 'execution.token': token},
-            {'$set': {'status': 'failed', 'error': str(error)[:8192],
+            {'$set': {'status': 'failed', 'error': str(error)[:config.jobs.error_max_length],
                       'updated_at': self.clock(), 'completed_at': self.clock(),
                       'completion_outbox': self._completion_event(job_id, 'failed')}},
         )
@@ -199,7 +243,7 @@ class MongoJobRepository:
         """Workflow compensation for worker death/timeouts outside Python code."""
         self.collection.update_one(
             {'_id': job_id, 'status': {'$nin': ['completed', 'failed']}},
-            {'$set': {'status': 'failed', 'error': str(error)[:8192],
+            {'$set': {'status': 'failed', 'error': str(error)[:config.jobs.error_max_length],
                       'execution.token': None, 'updated_at': self.clock(),
                       'completion_outbox': self._completion_event(job_id, 'failed')}},
         )

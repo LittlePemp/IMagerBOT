@@ -7,6 +7,7 @@ from temporalio.client import Client
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository
 from src.shared_kernel.loggers import presentation_logger
@@ -18,7 +19,7 @@ async def dispatch_once(repository, client) -> bool:
         return False
     job_id = event['job_id']
     token = event['dispatch_token']
-    workflow_id = f'imager:{job_id}'
+    workflow_id = event['workflow_id']
     request = event['request']
     try:
         try:
@@ -30,7 +31,7 @@ async def dispatch_once(repository, client) -> bool:
         try:
             await client.start_workflow(
                 'GenerateImageWorkflow',
-                request,
+                args=[request, event['execution_policy']],
                 id=workflow_id,
                 task_queue=settings.temporal_task_queue,
                 id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
@@ -39,6 +40,7 @@ async def dispatch_once(repository, client) -> bool:
                     'source': request['source'],
                     'parameters': request['parameters'],
                     'catalog_manifest': request['catalog_manifest'],
+                    'execution_policy': event['execution_policy'],
                 },
                 static_summary=f'IMager: {job_id}',
                 static_details=(
@@ -75,7 +77,9 @@ async def reconcile_once(repository, client):
     A UI termination bypasses workflow/Activity cleanup. Describe only workflows
     already accepted by Temporal; connection errors never imply job failure.
     """
-    jobs = await asyncio.to_thread(repository.unfinished_jobs, limit=20)
+    jobs = await asyncio.to_thread(
+        repository.unfinished_jobs, limit=config.temporal.dispatcher.reconcile_batch_size,
+    )
     for job in jobs:
         job_id = job['job_id']
         workflow_id = job['workflow_id']
@@ -109,7 +113,7 @@ async def main():
             )
             last_reconcile = 0
             while not stop.is_set():
-                if time.monotonic() - last_reconcile >= 10:
+                if time.monotonic() - last_reconcile >= config.temporal.dispatcher.reconcile_seconds:
                     await reconcile_once(repository, client)
                     last_reconcile = time.monotonic()
                 delivered = await dispatch_once(repository, client)
@@ -125,7 +129,7 @@ async def main():
         except Exception:
             presentation_logger.exception('Dispatcher connection/claim failed; retrying')
             try:
-                await asyncio.wait_for(stop.wait(), timeout=3)
+                await asyncio.wait_for(stop.wait(), timeout=config.temporal.dispatcher.reconnect_seconds)
             except asyncio.TimeoutError:
                 pass
 

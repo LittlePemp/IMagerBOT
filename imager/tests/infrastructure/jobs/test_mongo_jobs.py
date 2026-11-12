@@ -1,8 +1,11 @@
 import copy
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from types import SimpleNamespace
+from unittest.mock import patch
+from imager_config.loader import config
 
 from imager_contracts import JobRequest, make_submission, payload_fingerprint
 from src.infrastructure.jobs.mongo_jobs import (
@@ -62,7 +65,9 @@ class MemoryCollection:
                         return False
                     if operator == '$lte' and (actual is None or actual > operand):
                         return False
-                    if operator not in ('$in', '$nin', '$lte'):
+                    if operator == '$exists' and (actual is not None) != operand:
+                        return False
+                    if operator not in ('$in', '$nin', '$lte', '$exists'):
                         raise AssertionError(f'Unsupported fake operator {operator}')
             elif actual != expected:
                 return False
@@ -122,6 +127,29 @@ class MemoryCollection:
 
 
 class TestMongoJobs(unittest.TestCase):
+    def test_legacy_policy_and_workflow_identity_are_pinned_before_dispatch(self):
+        self.repository.receive(self.request)
+        del self.collection.documents['job_1']['execution_policy']
+        first = self.repository.claim_dispatch()
+        changed = replace(config, temporal=replace(
+            config.temporal, workflow_id_prefix='changed:',
+            render=replace(config.temporal.render, maximum_attempts=7),
+        ))
+        self.repository.defer_dispatch('job_1', first['dispatch_token'], 'disconnected')
+        self.now += timedelta(seconds=config.jobs.dispatch_retry_seconds)
+        with patch('src.infrastructure.jobs.mongo_jobs.config', changed):
+            second = self.repository.claim_dispatch()
+        self.assertEqual(first['execution_policy'], second['execution_policy'])
+        self.assertEqual(first['workflow_id'], second['workflow_id'])
+        self.assertEqual(first['execution_policy'], self.collection.documents['job_1']['execution_policy'])
+
+    def test_invalid_policy_snapshot_is_rejected_before_workflow_start(self):
+        self.repository.receive(self.request)
+        event = self.repository.claim_dispatch()
+        event['execution_policy']['render']['maximum_attempts'] = True
+        with self.assertRaises(JobConflict):
+            self.repository.validate_dispatch(event)
+
     def setUp(self):
         self.now = datetime(2026, 11, 12, tzinfo=timezone.utc)
         self.collection = MemoryCollection()

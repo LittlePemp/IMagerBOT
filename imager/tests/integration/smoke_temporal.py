@@ -54,6 +54,7 @@ async def run_smoke(args):
     import numpy as np
     from temporalio.client import Client
     from imager_contracts import GenerationParameters, JobRequest, ObjectRef
+    from imager_config.loader import config
     from settings import settings
     from src.infrastructure.jobs.mongo_jobs import JobConflict
     from src.infrastructure.object_storage.catalog import import_local_catalog
@@ -78,7 +79,7 @@ async def run_smoke(args):
                 require(cv2.imwrite(str(catalog_path / name), pixels), 'Synthetic catalog encoder failed')
 
             imported = await asyncio.to_thread(
-                import_local_catalog, catalog_path, store, database.catalog_groups,
+                import_local_catalog, catalog_path, store, database[config.mongo.catalog_collection],
                 group_name=group_name,
             )
             require(len(imported) == 1 and imported[0]['count'] == 2,
@@ -86,13 +87,16 @@ async def run_smoke(args):
             manifest = ObjectRef.from_dict(imported[0]['manifest'])
             x = np.tile(np.arange(64, dtype=np.uint8) * 4, (64, 1))
             source_pixels = np.dstack((x, np.flipud(x.T), np.fliplr(x)))
-            source_path = directory / 'source.jpg'
+            source_path = directory / config.storage.upload_filename
             require(cv2.imwrite(str(source_path), source_pixels), 'Synthetic source encoder failed')
             requests = []
             for index in range(args.jobs):
                 job_id = f'smoke_{run_id}_{index + 1:03d}'
                 source = await asyncio.to_thread(
-                    store.upload_file, source_path, f'uploads/{job_id}/source.jpg', 'image/jpeg',
+                    store.upload_file, source_path,
+                    config.storage.source_key_template.format(
+                        job_id=job_id, sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                    ), 'image/jpeg',
                 )
                 request = JobRequest(
                     job_id=job_id, source=ObjectRef.from_dict(source),
@@ -127,7 +131,7 @@ async def run_smoke(args):
             for request in requests:
                 job_id = request['job_id']
                 document = by_id[job_id]
-                workflow_id = f'imager:{job_id}'
+                workflow_id = document['dispatch']['workflow_id']
                 handle = client.get_workflow_handle(workflow_id)
                 workflow_result = await handle.result()
                 reference = ObjectRef.from_dict(document['result']).to_dict()
@@ -140,10 +144,14 @@ async def run_smoke(args):
                         and outbox.get('state') == 'pending', f'{job_id}: completion outbox is invalid')
                 execution = document['execution']
                 require(execution['fence'] == 1, f'{job_id}: expected one initial execution claim')
-                require(reference['key'] == f'jobs/{job_id}/attempts/{execution["token"]}/result.jpg',
+                expected_key = config.storage.result_key_template.format(
+                    job_id=job_id, execution_token=execution['token'],
+                    result_filename=config.storage.result_filename,
+                )
+                require(reference['key'] == expected_key,
                         f'{job_id}: published result is outside its execution attempt')
 
-                result_path = directory / f'{job_id}.jpg'
+                result_path = directory / job_id / config.storage.result_filename
                 await asyncio.to_thread(store.download_file, reference, result_path)
                 encoded = result_path.read_bytes()
                 require(hashlib.sha256(encoded).hexdigest() == reference['sha256']

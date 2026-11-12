@@ -1,10 +1,20 @@
 import asyncio
 import logging
+import sys
 from contextlib import suppress
 from datetime import datetime
+from pathlib import Path
+
+# Keep the repository's shared packages available when launched locally as
+# `cd telegram_bot; python main.py`, with the bot's own imports taking priority.
+_REPOSITORY_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(1, _REPOSITORY_ROOT)
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from motor.motor_asyncio import AsyncIOMotorClient
+from imager_config.loader import config
 from settings import settings
 from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import \
@@ -28,13 +38,19 @@ from src.infrastructure.services.imager_service.notifier import GenerationNotifi
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=settings.api_token.get_secret_value())
+bot = Bot(
+    token=settings.api_token.get_secret_value(),
+    session=AiohttpSession(timeout=config.bot.api_timeout_seconds),
+)
 dp = Dispatcher()
 
 # DB
 mongo_client = AsyncIOMotorClient(
-    settings.mongodb_uri, tz_aware=True, serverSelectionTimeoutMS=10000,
-    connectTimeoutMS=5000, socketTimeoutMS=10000, waitQueueTimeoutMS=10000,
+    settings.mongodb_uri, tz_aware=True,
+    serverSelectionTimeoutMS=config.mongo.server_selection_timeout_ms,
+    connectTimeoutMS=config.mongo.connect_timeout_ms,
+    socketTimeoutMS=config.mongo.socket_timeout_ms,
+    waitQueueTimeoutMS=config.mongo.wait_queue_timeout_ms,
 )
 db = mongo_client.get_database(settings.database_name)
 uow = get_uow(db)
@@ -113,7 +129,7 @@ async def main():
     finally:
         stop_notifications.set()
         try:
-            await asyncio.wait_for(asyncio.shield(notifier_task), timeout=30)
+            await asyncio.wait_for(asyncio.shield(notifier_task), timeout=config.bot.shutdown_seconds)
         except asyncio.TimeoutError:
             notifier_task.cancel()
             with suppress(asyncio.CancelledError):

@@ -72,6 +72,18 @@ class TestImagerBuilder(unittest.TestCase):
         self.assertTrue(result, result.error)
         self.assertEqual(cv2.imread(os.path.join(self.root, result.value)).shape, (3, 3, 3))
 
+    def test_render_progress_is_scoped_to_the_call(self):
+        source = np.full((24, 32, 3), 100, dtype=np.uint8)
+        progress = Mock()
+        first = self.builder.render_image(source, 'test', progress)
+        self.assertTrue(first, first.error)
+        self.assertEqual(progress.call_args.args[0]['completed_cells'], 12)
+        self.assertFalse(hasattr(self.builder, '_progress_callback'))
+        progress.reset_mock()
+        second = self.builder.render_image(source, 'test')
+        self.assertTrue(second, second.error)
+        progress.assert_not_called()
+
     def test_grayscale_and_uint16_sources_are_normalized(self):
         for image in (
             np.full((24, 32), 50, dtype=np.uint8),

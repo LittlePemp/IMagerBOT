@@ -11,15 +11,17 @@ import tempfile
 import time
 from pathlib import Path
 
+from imager_config.loader import config
+from imager_contracts.protocol import JSON_EXTENSION, TEMPORARY_FILE_SUFFIX
 from src.shared_kernel.loggers import presentation_logger
 
 
 class RpcJournal:
-    def __init__(self, artifact_root: str | Path, ttl_seconds: float = 86400, max_entries: int = 1000):
+    def __init__(self, artifact_root: str | Path, ttl_seconds: float | None = None, max_entries: int | None = None):
         self.artifact_root = Path(artifact_root).resolve()
-        self.directory = self.artifact_root / '.rpc-results'
-        self.ttl_seconds = ttl_seconds
-        self.max_entries = max_entries
+        self.directory = self.artifact_root / config.paths.rpc_journal_directory
+        self.ttl_seconds = config.legacy.rpc_result_ttl_seconds if ttl_seconds is None else ttl_seconds
+        self.max_entries = config.legacy.rpc_result_max_entries if max_entries is None else max_entries
 
     @staticmethod
     def fingerprint(action: str, payload: dict) -> str:
@@ -27,7 +29,7 @@ class RpcJournal:
         return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
     def _path(self, request_id: str) -> Path:
-        return self.directory / (hashlib.sha256(request_id.encode('utf-8')).hexdigest() + '.json')
+        return self.directory / (hashlib.sha256(request_id.encode('utf-8')).hexdigest() + JSON_EXTENSION)
 
     def get(self, request_id: str, fingerprint: str) -> dict | None:
         path = self._path(request_id)
@@ -64,7 +66,9 @@ class RpcJournal:
             'response': response,
             'created_at': time.time(),
         }
-        descriptor, temporary = tempfile.mkstemp(prefix='.rpc-', suffix='.tmp', dir=self.directory)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=config.storage.rpc_temp_prefix, suffix=TEMPORARY_FILE_SUFFIX, dir=self.directory,
+        )
         try:
             with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
                 json.dump(record, target, separators=(',', ':'))
@@ -79,7 +83,7 @@ class RpcJournal:
     def prune(self) -> None:
         now = time.time()
         entries = []
-        for path in self.directory.glob('*.json'):
+        for path in self.directory.glob(f'*{JSON_EXTENSION}'):
             try:
                 modified = path.stat().st_mtime
                 if now - modified > self.ttl_seconds:
@@ -90,7 +94,7 @@ class RpcJournal:
                 continue
         for _, path in sorted(entries)[:max(0, len(entries) - self.max_entries)]:
             path.unlink(missing_ok=True)
-        for path in self.directory.glob('.rpc-*.tmp'):
+        for path in self.directory.glob(f'{config.storage.rpc_temp_prefix}*{TEMPORARY_FILE_SUFFIX}'):
             try:
                 if now - path.stat().st_mtime > self.ttl_seconds:
                     path.unlink(missing_ok=True)

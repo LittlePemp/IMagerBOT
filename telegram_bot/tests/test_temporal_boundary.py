@@ -3,6 +3,7 @@ import copy
 import hashlib
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -12,6 +13,7 @@ from src.infrastructure.services.imager_service.notifier import GenerationNotifi
 from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
 from src.infrastructure.services.object_storage import BotObjectStorage
 from src.models.generation_history import generation_history_record_id
+from imager_config.loader import config
 
 
 class HistoryCollection:
@@ -63,9 +65,9 @@ class Database:
                       'manifest': reference('catalog/animals/manifest.json', b'manifest')}
 
     def __getitem__(self, name):
-        if name == 'generation_jobs':
+        if name == config.mongo.jobs_collection:
             return self.jobs
-        if name == 'catalog_groups':
+        if name == config.mongo.catalog_collection:
             return SimpleNamespace(find_one=lambda query: copy.deepcopy(self.group))
         raise AssertionError(name)
 
@@ -134,6 +136,29 @@ class Minio:
 
 
 class TestObjectStorage(unittest.TestCase):
+    def test_nondefault_source_key_and_accepted_legacy_result_key(self):
+        from src.infrastructure.services.object_storage import minio_storage
+
+        configured = replace(config, storage=replace(
+            config.storage, source_key_template='new-sources/{sha256}/{job_id}.jpg',
+        ))
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'photo.jpg'
+            source.write_bytes(b'source-photo')
+            with patch.object(minio_storage, 'config', configured):
+                uploaded = storage.upload_source(source, 'job-1')
+                self.assertEqual(uploaded['key'],
+                                 f"new-sources/{uploaded['sha256']}/job-1.jpg")
+                # Immutable accepted references remain valid after key-layout
+                # configuration changes, including an older output prefix.
+                old_result = reference('previous-output/job-1/final.jpg', b'finished')
+                client.objects[('imager', old_result['key'])] = b'finished'
+                output = Path(directory) / 'download.jpg'
+                storage.download_result(old_result, output, max_bytes=100)
+                self.assertEqual(output.read_bytes(), b'finished')
+
     def test_upload_and_result_download_verify_hashes(self):
         client = Minio()
         storage = BotObjectStorage('', '', '', 'imager', client=client)
@@ -269,7 +294,7 @@ class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
             submit_generation=AsyncMock(),
         )
 
-        async def download(remote, destination):
+        async def download(remote, destination, **kwargs):
             Path(destination).write_bytes(b'photo')
 
         message = SimpleNamespace(
@@ -335,7 +360,7 @@ class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
             return None
 
         service.get_job = AsyncMock(side_effect=initially_missing)
-        async def download(remote, destination):
+        async def download(remote, destination, **kwargs):
             Path(destination).write_bytes(b'photo')
 
         message = SimpleNamespace(

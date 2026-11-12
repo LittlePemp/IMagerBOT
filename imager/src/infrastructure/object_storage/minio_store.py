@@ -6,6 +6,11 @@ import tempfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
+from imager_config.loader import config
+from imager_contracts.protocol import (
+    BINARY_CONTENT_TYPE, JSON_CONTENT_TYPE, OBJECT_KEY_MAX_LENGTH, SHA256_PATTERN,
+)
+
 
 class ObjectIntegrityError(ValueError):
     """The object reference and the stored bytes do not describe the same asset."""
@@ -35,7 +40,7 @@ def reference_dict(reference):
 def file_sha256(path):
     digest = hashlib.sha256()
     with open(path, 'rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        for chunk in iter(lambda: stream.read(config.storage.transfer_chunk_bytes), b''):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -47,18 +52,25 @@ class MinioObjectStore:
     upload worker instead of being retained as another full in-memory image.
     """
 
-    def __init__(self, endpoint, access_key, secret_key, bucket, secure=False,
+    def __init__(self, endpoint, access_key, secret_key, bucket, secure=None,
                  client=None):
         if not bucket or not isinstance(bucket, str):
             raise ValueError('MinIO bucket is required')
         self.bucket = bucket
+        secure = config.storage.secure if secure is None else secure
         if client is None:
             from minio import Minio
             import urllib3
             client = Minio(endpoint, access_key=access_key, secret_key=secret_key,
                            secure=secure, http_client=urllib3.PoolManager(
-                               timeout=urllib3.Timeout(connect=5, read=30),
-                               retries=urllib3.Retry(total=2, backoff_factor=0.2),
+                               timeout=urllib3.Timeout(
+                                   connect=config.storage.connect_timeout_seconds,
+                                   read=config.storage.read_timeout_seconds,
+                               ),
+                               retries=urllib3.Retry(
+                                   total=config.storage.retry_attempts,
+                                   backoff_factor=config.storage.retry_backoff_seconds,
+                               ),
                            ))
         self.client = client
 
@@ -74,7 +86,7 @@ class MinioObjectStore:
 
     @staticmethod
     def _key(value):
-        if (not isinstance(value, str) or not value or len(value) > 1024
+        if (not isinstance(value, str) or not value or len(value) > OBJECT_KEY_MAX_LENGTH
                 or value.startswith('/') or '\\' in value or '\x00' in value
                 or any(part in ('', '.', '..') for part in value.split('/'))):
             raise ValueError('Object key must be a normalized relative S3 key')
@@ -86,14 +98,15 @@ class MinioObjectStore:
             raise ValueError('Object reference uses a different bucket')
         self._key(ref.get('key'))
         digest = ref.get('sha256')
-        if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
+        if not isinstance(digest, str) or not re.fullmatch(SHA256_PATTERN, digest):
             raise ValueError('Object reference requires a lowercase SHA256 digest')
         size = ref.get('size_bytes')
         if type(size) is not int or not 0 < size <= max_bytes:
             raise ValueError(f'Object size must be between 1 and {max_bytes} bytes')
         return ref
 
-    def upload_file(self, path, key, content_type='application/octet-stream'):
+    def upload_file(self, path, key, content_type=None):
+        content_type = BINARY_CONTENT_TYPE if content_type is None else content_type
         key = self._key(key)
         size = os.path.getsize(path)
         if size <= 0:
@@ -115,17 +128,21 @@ class MinioObjectStore:
         try:
             self.client.fput_object(
                 self.bucket, key, str(path), content_type=content_type,
-                metadata={'sha256': digest}, num_parallel_uploads=1,
+                metadata={'sha256': digest},
+                num_parallel_uploads=config.storage.upload_parallelism,
             )
         except Exception as error:
             raise ObjectStoreError(error) from error
         return ref
 
-    def download_file(self, reference, path, max_bytes=64_000_000):
+    def download_file(self, reference, path, max_bytes=None):
+        max_bytes = config.limits.source_file_bytes if max_bytes is None else max_bytes
         ref = self.validate_reference(reference, max_bytes)
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix='.download-', dir=target.parent)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=config.storage.download_temp_prefix, dir=target.parent,
+        )
         response = None
         try:
             response = self.client.get_object(ref['bucket'], ref['key'])
@@ -133,7 +150,7 @@ class MinioObjectStore:
             with os.fdopen(descriptor, 'wb') as stream:
                 descriptor = None
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    chunk = response.read(config.storage.transfer_chunk_bytes)
                     if not chunk:
                         break
                     size += len(chunk)
@@ -164,21 +181,24 @@ class MinioObjectStore:
                 except FileNotFoundError:
                     pass
 
-    def read_json(self, reference, max_bytes=16_000_000):
-        with tempfile.TemporaryDirectory(prefix='imager-manifest-') as directory:
-            path = self.download_file(reference, Path(directory) / 'manifest.json', max_bytes)
+    def read_json(self, reference, max_bytes=None):
+        max_bytes = config.catalog.max_manifest_bytes if max_bytes is None else max_bytes
+        with tempfile.TemporaryDirectory(prefix=config.storage.manifest_temp_prefix) as directory:
+            path = self.download_file(
+                reference, Path(directory) / config.storage.manifest_filename, max_bytes,
+            )
             with open(path, encoding='utf-8') as stream:
                 return json.load(stream)
 
     def put_json(self, value, key):
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=False).encode('utf-8')
-        if len(encoded) > 16_000_000:
-            raise ValueError('Catalog manifest exceeds 16 MB')
-        with tempfile.TemporaryDirectory(prefix='imager-json-') as directory:
-            path = Path(directory) / 'manifest.json'
+        if len(encoded) > config.catalog.max_manifest_bytes:
+            raise ValueError(f'Catalog manifest exceeds {config.catalog.max_manifest_bytes} bytes')
+        with tempfile.TemporaryDirectory(prefix=config.storage.json_temp_prefix) as directory:
+            path = Path(directory) / config.storage.manifest_filename
             path.write_bytes(encoded)
-            return self.upload_file(path, key, 'application/json')
+            return self.upload_file(path, key, JSON_CONTENT_TYPE)
 
 
 def object_store_from_settings(settings):

@@ -1,9 +1,10 @@
 from loguru import logger
+from imager_config.loader import config
 
 logger.add(
     'logs/services.log',
-    rotation='10 MB',
-    retention=3,
+    rotation=config.logging.rotation_bytes,
+    retention=config.logging.retained_archives,
     level='INFO',
     format='{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}',
     filter=lambda record: record['extra'].get('name') == 'service_logger',

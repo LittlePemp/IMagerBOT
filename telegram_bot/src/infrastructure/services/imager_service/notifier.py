@@ -10,6 +10,7 @@ from pathlib import Path
 
 from aiogram.types import FSInputFile
 
+from imager_config.loader import config
 from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 from src.utils.loggers import exception_logger, service_logger
 
@@ -21,7 +22,10 @@ class GenerationNotifier:
         self.history_repository = history_repository
 
     async def _renew(self, job_id, token, lost):
-        interval = max(1, self.service.config.bot_notification_lease_seconds / 3)
+        interval = max(
+            config.bot.notification_renew_min_seconds,
+            self.service.config.bot_notification_lease_seconds / config.bot.notification_renew_divisor,
+        )
         while True:
             await asyncio.sleep(interval)
             try:
@@ -68,8 +72,8 @@ class GenerationNotifier:
             if job['status'] == 'completed':
                 if not result:
                     raise ValueError('Completed job has no result object')
-                with tempfile.TemporaryDirectory(prefix='imager-result-') as directory:
-                    path = Path(directory) / 'result.jpg'
+                with tempfile.TemporaryDirectory(prefix=config.storage.result_temp_prefix) as directory:
+                    path = Path(directory) / config.storage.result_filename
                     await asyncio.to_thread(
                         self.service.object_store.download_result, result, path,
                         max_bytes=self.service.config.telegram_max_document_size_bytes,
@@ -79,7 +83,9 @@ class GenerationNotifier:
                     filename = context.get('display_name') or job_id
                     message = await self.bot.send_document(
                         chat_id=chat_id,
-                        document=FSInputFile(path, filename=f'{filename}.jpg'),
+                        document=FSInputFile(
+                            path, filename=f'{filename}{Path(config.storage.result_filename).suffix}'
+                        ),
                         caption=f'Ваше изображение готово.\nЗадание: {job_id}',
                     )
             else:
@@ -87,7 +93,7 @@ class GenerationNotifier:
                     raise RuntimeError('Delivery lease was lost before sending the notification')
                 message = await self.bot.send_message(
                     chat_id=chat_id,
-                    text=f'Не удалось собрать изображение.\nЗадание: {job_id}\n{error[:1600]}',
+                    text=f'Не удалось собрать изображение.\nЗадание: {job_id}\n{error[:config.bot.error_excerpt_length]}',
                 )
             acknowledged = await self.service.acknowledge_completion(
                 job_id, token, message.message_id
