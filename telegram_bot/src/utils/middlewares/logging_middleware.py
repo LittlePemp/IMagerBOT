@@ -7,11 +7,11 @@ class LoggingMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event, data):
         data['service'] = data.get('service', 'unknown_service')
-        self.logger.info(f'Received event: {event}', extra={'service': data['service']})
+        self.logger.info(f'Received update: update_id={event.update_id}')
         try:
             result = await handler(event, data)
-            self.logger.info(f'Processed event: {event} with result: {result}', extra={'service': data['service']})
+            self.logger.info(f'Processed update: update_id={event.update_id}')
             return result
         except Exception as e:
-            self.logger.error(f'Error processing event: {event} with error: {e}', extra={'service': data['service']})
+            self.logger.exception(f'Update failed: update_id={event.update_id}')
             raise

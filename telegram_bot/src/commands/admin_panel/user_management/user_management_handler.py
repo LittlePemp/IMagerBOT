@@ -1,87 +1,65 @@
 from aiogram import Dispatcher, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
 
-from src.commands.admin_panel.user_management.user_management_keyboard import (
-    user_action_keyboard,
-)
-from src.commands.admin_panel.user_management.user_management_states import (
-    UserManagementStates,
-)
-from src.commands.common_keyboards import home_keyboard
-from src.infrastructure.data.repositories.user_repository import UserRepository
-from src.models.user import User, UserStatus
+from settings import settings
+from src.utils.filters.request_filters.admin_filter import AdminFilter
+from ..ui import AdminCallback, command, show
+from .user_management_states import UserManagementStates
 
 
-async def user_management(callback: CallbackQuery, state: FSMContext):
-    user_repository: UserRepository = callback.bot.user_repository
-    user_count = await user_repository.get_user_count()
-    await callback.message.edit_text(
-        f"Общее количество пользователей: {user_count}\n"
-        "Пожалуйста, введите username или ID пользователя:",
-        reply_markup=home_keyboard(),
-    )
-    await state.set_state(UserManagementStates.waiting_for_username_or_id)
-    await callback.answer()
-
-
-async def receive_username_or_id(message: Message, state: FSMContext):
-    user_repository: UserRepository = message.bot.user_repository
-    user_input = (message.text or "").strip()
-    user = await fetch_user(user_input, user_repository)
-
-    if not user:
-        await message.answer("Пользователь не найден.", reply_markup=home_keyboard())
-        await state.clear()
-        return
-
-    user_info = format_user_info(user)
-    await state.update_data(
-        user_id=user.telegram_id,
-        isbanned=user.isbanned,
-        is_admin=(user.status == UserStatus.ADMIN),
-    )
-    await message.answer(
-        user_info,
-        reply_markup=user_action_keyboard(user.isbanned, user.status == UserStatus.ADMIN),
-    )
-    await state.set_state(UserManagementStates.waiting_for_action)
-
-
-async def back_to_status(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    user_repository: UserRepository = callback.bot.user_repository
-    user_id = data["user_id"]
-    user = await user_repository.get_user_by_id(user_id)
-    user_info = format_user_info(user)
-    await callback.message.edit_text(
-        user_info,
-        reply_markup=user_action_keyboard(user.isbanned, user.status == UserStatus.ADMIN),
-    )
-    await callback.answer()
-
-
-def format_user_info(user: User) -> str:
+def format_user_info(user):
+    fixed = user.telegram_id in settings.telegram_admin_ids
     return (
-        f"Имя пользователя: {user.telegram_username}\n"
-        f"ID пользователя: {user.telegram_id}\n"
-        f"Зарегистрирован: {user.registered_datetime_utc}\n"
-        f"Последняя активность: {user.last_activity_datetime_utc}\n"
-        f"Заблокирован: {user.isbanned}\n"
-        f"Статус: {user.status.value}"
+        f"Username: {user.telegram_username or 'не указан'}\n"
+        f"ID: {user.telegram_id}\n"
+        f"Зарегистрирован: {user.registered_datetime_utc:%d.%m.%Y}\n"
+        f"Заблокирован: {'да' if user.isbanned else 'нет'}\n"
+        f"Роль: {'постоянный администратор' if fixed else user.status.value}"
     )
 
 
-async def fetch_user(user_input: str, user_repository: UserRepository):
-    if user_input.isdigit():
-        return await user_repository.get_user_by_id(int(user_input))
-    user = await user_repository.get_user_by_username(user_input)
+async def render_user(event, state, user):
+    fixed = user.telegram_id in settings.telegram_admin_ids
+    buttons = []
+    if not fixed:
+        buttons.extend([
+            ('Разблокировать' if user.isbanned else 'Заблокировать', 'unban' if user.isbanned else 'ban', 0),
+            ('Снять администратора' if user.is_admin else 'Назначить администратора', 'revoke' if user.is_admin else 'grant', 0),
+        ])
+    buttons.append(('Найти другого пользователя', 'users', 0))
+    await show(
+        event, state, format_user_info(user), buttons,
+        records={'0': {'user_id': user.telegram_id, 'revision': user.revision}},
+        fsm=UserManagementStates.waiting_for_action,
+    )
+
+
+async def user_management(callback, state: FSMContext, user_repository):
+    if not await command(callback, state):
+        return
+    count = await user_repository.get_user_count()
+    await show(callback, state, f'Пользователей: {count}.\nВведите ID или @username:', [
+        ('Назад', 'home', 0),
+    ], fsm=UserManagementStates.waiting_for_username_or_id)
+
+
+async def receive_username_or_id(message, state: FSMContext, user_repository):
+    text = (message.text or '').strip()
+    user = await fetch_user(text, user_repository)
     if user:
-        await user_repository.update_user(user.telegram_id, {"telegram_username": user_input})
-    return user
+        await render_user(message, state, user)
+    else:
+        await show(message, state, 'Пользователь не найден. Введите ID или @username:', [
+            ('Назад', 'home', 0),
+        ], fsm=UserManagementStates.waiting_for_username_or_id)
+
+
+async def fetch_user(text, user_repository):
+    if text.isascii() and text.isdigit():
+        return await user_repository.get_user_by_id(int(text))
+    return await user_repository.get_user_by_username(text.removeprefix('@').casefold())
 
 
 def register_handlers_user_management(dp: Dispatcher):
-    dp.callback_query.register(user_management, F.data == "admin_panel:users")
-    dp.message.register(receive_username_or_id, UserManagementStates.waiting_for_username_or_id)
-    dp.callback_query.register(back_to_status, F.data == "user_action:back_to_status")
+    dp.callback_query.register(user_management, AdminCallback.filter(F.action == 'users'), AdminFilter())
+    dp.message.register(receive_username_or_id, UserManagementStates.waiting_for_username_or_id, AdminFilter())

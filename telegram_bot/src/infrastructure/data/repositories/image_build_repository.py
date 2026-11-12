@@ -1,87 +1,53 @@
-from motor.motor_asyncio import AsyncIOMotorCollection
-from typing import List
+from bson import ObjectId
+from pydantic import ValidationError
+from pymongo.asynchronous.collection import AsyncCollection
+
 from src.models.image_build_params import CommonParam, ParamType
-from src.utils.loggers import db_logger, exception_logger
 from src.utils.building_blocks.result import Result
-from src.models.image_group import ImageGroup
+from src.utils.loggers import exception_logger
+
 
 class ImageBuildParamsRepository:
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(ImageBuildParamsRepository, cls).__new__(cls)
-        return cls._instance
-
-    def __init__(self, collection: AsyncIOMotorCollection):
-        if hasattr(self, '_initialized') and self._initialized:
-            return
+    def __init__(self, collection: AsyncCollection):
         self.collection = collection
-        self._initialized = True
+
+    async def initialize_indexes(self):
+        await self.collection.create_index(
+            [('type', 1), ('name', 1)], unique=True,
+            partialFilterExpression={
+                'type': {'$in': [ParamType.IMAGE_SIZE.value, ParamType.NOISE_LEVEL.value, ParamType.INSET_SIZE.value]},
+                'name': {'$type': 'string'},
+            },
+        )
 
     async def add_common_param(self, param: CommonParam) -> Result:
+        validated = CommonParam.model_validate(param.model_dump())
         try:
-            await self.collection.insert_one(param.model_dump())
-            db_logger.info(f'Param added: {param}')
-            return Result.Success(param)
-        except Exception as e:
-            exception_logger.error(f'Failed to add param: {e}')
-            return Result.Error(f'Failed to add param: {e}')
+            await self.collection.insert_one(validated.model_dump())
+            return Result.Success(validated)
+        except Exception:
+            exception_logger.exception('Cannot save generation preset')
+            return Result.Error('Не удалось сохранить параметр. Возможно, такое название уже существует.')
 
     async def get_common_params(self, param_type: ParamType) -> Result:
-        try:
-            params = await self.collection.find({'type': param_type}).to_list(length=None)
-            return Result.Success([CommonParam(**param) for param in params])
-        except Exception as e:
-            exception_logger.error(f'Failed to get params: {e}')
-            return Result.Error(f'Failed to get params: {e}')
+        documents = await self.collection.find({'type': param_type}).sort('name', 1).to_list(length=None)
+        params = []
+        for document in documents:
+            try:
+                params.append(CommonParam(**document))
+            except ValidationError:
+                exception_logger.warning(f'Invalid legacy preset excluded from selection: id={document.get("_id")}')
+        return Result.Success(params)
+
+    async def get_admin_params(self, param_type: ParamType):
+        """Include invalid legacy rows so an administrator can remove them."""
+        rows = await self.collection.find({'type': param_type}).sort('name', 1).to_list(length=None)
+        return [dict(row, record_id=str(row['_id'])) for row in rows]
 
     async def delete_common_param(self, param_type: ParamType, param_name: str) -> Result:
-        try:
-            result = await self.collection.delete_one({'type': param_type, 'name': param_name})
-            if result.deleted_count == 0:
-                return Result.Error(f'Param with name {param_name} not found')
-            db_logger.info(f'Param deleted: {param_name}')
-            return Result.Success(None)
-        except Exception as e:
-            exception_logger.error(f'Failed to delete param: {e}')
-            return Result.Error(f'Failed to delete param: {e}')
+        result = await self.collection.delete_one({'type': param_type, 'name': param_name})
+        return Result.Success(None) if result.deleted_count else Result.Error('Параметр уже удалён.')
 
-    async def add_image_group(self, image_group: ImageGroup) -> Result:
-        try:
-            await self.collection.insert_one(image_group.model_dump())
-            db_logger.info(f'Image group added: {image_group}')
-            return Result.Success(image_group)
-        except Exception as e:
-            exception_logger.error(f'Failed to add image group: {e}')
-            return Result.Error(f'Failed to add image group: {e}')
-
-    async def get_image_groups(self) -> Result:
-        try:
-            groups = await self.collection.find({'type': ParamType.IMAGE_GROUP}).to_list(length=None)
-            return Result.Success([ImageGroup(**group) for group in groups])
-        except Exception as e:
-            exception_logger.error(f'Failed to get image groups: {e}')
-            return Result.Error(f'Failed to get image groups: {e}')
-
-    async def update_image_group_status(self, name: str, active: bool) -> Result:
-        try:
-            result = await self.collection.update_one({'type': ParamType.IMAGE_GROUP, 'name': name}, {'$set': {'active': active}})
-            if result.matched_count == 0:
-                return Result.Error(f'Image group with name {name} not found')
-            db_logger.info(f'Image group status updated: {name} to {"active" if active else "inactive"}')
-            return Result.Success(None)
-        except Exception as e:
-            exception_logger.error(f'Failed to update image group status: {e}')
-            return Result.Error(f'Failed to update image group status: {e}')
-
-    async def rename_image_group(self, old_name: str, new_name: str) -> Result:
-        try:
-            result = await self.collection.update_one({'type': ParamType.IMAGE_GROUP, 'name': old_name}, {'$set': {'name': new_name}})
-            if result.matched_count == 0:
-                return Result.Error(f'Image group with name {old_name} not found')
-            db_logger.info(f'Image group renamed from {old_name} to {new_name}')
-            return Result.Success(None)
-        except Exception as e:
-            exception_logger.error(f'Failed to rename image group: {e}')
-            return Result.Error(f'Failed to rename image group: {e}')
+    async def delete_by_id(self, record_id: str, param_type: ParamType) -> bool:
+        result = await self.collection.delete_one({'_id': ObjectId(record_id), 'type': param_type})
+        return bool(result.deleted_count)

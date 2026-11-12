@@ -190,6 +190,16 @@ def _validate(config):
         raise ConfigurationError('render.output_filename_template produces an oversized filename')
 
     bot, generation = config.bot, config.generation
+    if not 0 < bot.notification_retry_jitter_ratio <= 1:
+        raise ConfigurationError('bot.notification_retry_jitter_ratio must be at most one')
+    if bot.history_repair_retry_initial_seconds > bot.history_repair_retry_max_seconds:
+        raise ConfigurationError('History repair backoff bounds are inverted')
+    if bot.ui_page_size > 20 or bot.ui_label_max_length > bot.ui_name_max_length:
+        raise ConfigurationError('Bot UI page or label bounds are invalid')
+    if bot.ui_view_token_bytes > 16:
+        raise ConfigurationError('Bot view tokens must fit Telegram callback data')
+    if bot.max_concurrent_uploads > bot.max_concurrent_updates:
+        raise ConfigurationError('Upload concurrency must fit update concurrency')
     if generation.insertion_format not in INSERTION_FORMATS:
         raise ConfigurationError('generation.insertion_format is unsupported')
     if not 0 <= generation.alpha_channel <= PERCENT_MAX:

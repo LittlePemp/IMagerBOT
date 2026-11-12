@@ -11,13 +11,14 @@ from uuid import uuid4
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from imager_contracts import make_submission
-from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH
+from imager_contracts import JobRequest, make_submission, payload_fingerprint
+from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, SCHEMA_VERSION
 from imager_config.loader import config as runtime_config
 from src.infrastructure.services.object_storage import BotObjectStorage
 from src.utils.loggers import service_logger
 
 from .schemas import GenerationAccepted, GroupInfo, ListGroupsResponse, SyncGroupsResponse
+from .delivery_policy import bounded_backoff, delivery_failure
 
 
 def _secret(value):
@@ -59,8 +60,35 @@ class ImagerService:
     def jobs(self):
         return self.database[runtime_config.mongo.jobs_collection]
 
+    async def ensure_indexes(self):
+        await asyncio.to_thread(
+            self.jobs.create_index,
+            [('request.client_id', 1), ('request.client_context.user_id', 1), ('created_at', 1)],
+            name='telegram_user_jobs',
+        )
+        await asyncio.to_thread(
+            self.jobs.create_index,
+            [('request.client_id', 1), ('status', 1),
+             ('telegram_history_projection.state', 1),
+             ('telegram_history_projection.available_at', 1),
+             ('telegram_history_projection.lease_until', 1)],
+            name='telegram_history_repair',
+        )
+
     async def get_job(self, job_id):
         return await asyncio.to_thread(self.jobs.find_one, {'_id': job_id})
+
+    async def count_active_jobs(self):
+        return await asyncio.to_thread(
+            self.jobs.count_documents, {'status': {'$nin': ['completed', 'failed']}},
+        )
+
+    async def count_user_jobs_between(self, actor_id, start, end):
+        return await asyncio.to_thread(
+            self.jobs.count_documents,
+            {'request.client_id': 'telegram', 'request.client_context.user_id': actor_id,
+             'created_at': {'$gte': start, '$lt': end}},
+        )
 
     async def upload_source(self, path, job_id):
         try:
@@ -69,8 +97,8 @@ class ImagerService:
             service_logger.exception(f'Source upload failed: job_id={job_id}')
             raise
 
-    async def submit_generation(self, request, *, job_id, client_context):
-        """A successful return means command+pending outbox are persisted."""
+    async def prepare_submission(self, request, *, job_id, client_context):
+        """Resolve the catalog and execution policy once, before durable admission."""
         group = await asyncio.to_thread(
             self.database[runtime_config.mongo.catalog_collection].find_one, {'_id': request.group_name}
         )
@@ -87,6 +115,17 @@ class ImagerService:
             'client_context': dict(client_context),
         }
         document = make_submission(envelope)
+        document['dispatch']['workflow_id'] = f'{runtime_config.temporal.workflow_id_prefix}{job_id}'
+        return document
+
+    async def publish_submission(self, document):
+        """Publish the exact admission snapshot; never re-read mutable settings."""
+        request = JobRequest.from_dict(document['request'])
+        job_id = request.job_id
+        if (document.get('_id') != job_id
+                or document.get('schema_version') != SCHEMA_VERSION
+                or document.get('payload_hash') != payload_fingerprint(request)):
+            raise ValueError('Stored admission has an inconsistent request identity')
         try:
             try:
                 await asyncio.to_thread(
@@ -103,11 +142,19 @@ class ImagerService:
             service_logger.info(f'Generation command accepted: job_id={job_id}')
             return GenerationAccepted(
                 job_id=job_id, status=stored['status'],
-                workflow_id=f'{runtime_config.temporal.workflow_id_prefix}{job_id}',
+                workflow_id=(stored.get('dispatch', {}).get('workflow_id')
+                             or f'{runtime_config.temporal.workflow_id_prefix}{job_id}'),
             )
         except Exception:
             service_logger.exception(f'Generation submission failed: job_id={job_id}')
             raise
+
+    async def submit_generation(self, request, *, job_id, client_context):
+        """Compatibility entry point; success means the core inbox is persisted."""
+        document = await self.prepare_submission(
+            request, job_id=job_id, client_context=client_context,
+        )
+        return await self.publish_submission(document)
 
     async def list_groups(self):
         documents = await asyncio.to_thread(
@@ -197,26 +244,124 @@ class ImagerService:
         return result.matched_count == 1
 
     async def fail_completion(self, job_id, token, attempts, error):
-        exhausted = attempts >= self.config.bot_notification_max_attempts
-        await asyncio.to_thread(
+        failure = delivery_failure(error, attempts, runtime_config.bot)
+        exhausted = (not failure.restore_attempt
+                     and attempts >= self.config.bot_notification_max_attempts)
+        terminal = failure.retry_seconds is None or exhausted
+        update = {'$set': {
+            'completion_outbox.state': 'failed' if terminal else 'pending',
+            'completion_outbox.error': str(error)[:runtime_config.bot.error_max_length],
+            'completion_outbox.error_kind': failure.kind.value,
+            'completion_outbox.available_at': (
+                datetime.now(timezone.utc) + timedelta(seconds=failure.retry_seconds)
+                if not terminal else None
+            ),
+            'completion_outbox.lease_until': None,
+        }}
+        if failure.restore_attempt:
+            update['$inc'] = {'completion_outbox.attempts': -1}
+        result = await asyncio.to_thread(
             self.jobs.update_one,
             {'_id': job_id, 'completion_outbox.state': 'claimed', 'completion_outbox.token': token},
-            {'$set': {
-                'completion_outbox.state': 'failed' if exhausted else 'pending',
-                'completion_outbox.error': str(error)[:runtime_config.bot.error_max_length],
-                'completion_outbox.available_at': datetime.now(timezone.utc) + timedelta(
-                    seconds=min(
-                        runtime_config.bot.notification_retry_initial_seconds
-                        * runtime_config.bot.notification_retry_backoff_coefficient ** (attempts - 1),
-                        runtime_config.bot.notification_retry_max_seconds,
-                    )
-                ),
-                'completion_outbox.lease_until': None,
-            }},
+            update,
         )
         service_logger.error(
-            f'Telegram delivery failed: job_id={job_id}, attempts={attempts}, exhausted={exhausted}, error={error}'
+            f'Telegram delivery failed: job_id={job_id}, attempts={attempts}, '
+            f'kind={failure.kind.value}, terminal={terminal}, error={error}'
         )
+        return result.matched_count == 1
+
+    async def claim_history_projection(self):
+        """Repair terminal job history independently of Telegram delivery state."""
+        now = datetime.now(timezone.utc)
+        token = uuid4().hex
+        return await asyncio.to_thread(
+            self.jobs.find_one_and_update,
+            {
+                'request.client_id': 'telegram',
+                'status': {'$in': ['completed', 'failed']},
+                'request.client_context.history_record_id': {'$exists': True},
+                '$or': [
+                    {'telegram_history_projection.state': {'$exists': False}},
+                    {'telegram_history_projection.state': 'pending',
+                     'telegram_history_projection.available_at': {'$lte': now}},
+                    {'telegram_history_projection.state': 'claimed',
+                     'telegram_history_projection.lease_until': {'$lte': now}},
+                ],
+            },
+            {'$set': {
+                'telegram_history_projection.state': 'claimed',
+                'telegram_history_projection.token': token,
+                'telegram_history_projection.lease_until': now + timedelta(
+                    seconds=runtime_config.bot.history_repair_lease_seconds,
+                ),
+            }, '$inc': {'telegram_history_projection.attempts': 1}},
+            sort=[('updated_at', 1)], return_document=ReturnDocument.AFTER,
+        )
+
+    async def acknowledge_history_projection(self, job_id, token):
+        result = await asyncio.to_thread(
+            self.jobs.update_one,
+            {'_id': job_id, 'telegram_history_projection.state': 'claimed',
+             'telegram_history_projection.token': token},
+            {'$set': {
+                'telegram_history_projection.state': 'synced',
+                'telegram_history_projection.synced_at': datetime.now(timezone.utc),
+                'telegram_history_projection.lease_until': None,
+                'telegram_history_projection.error': None,
+            }},
+        )
+        return result.matched_count == 1
+
+    async def fail_history_projection(self, job_id, token, attempts, error):
+        delay = bounded_backoff(
+            attempts, runtime_config.bot.history_repair_retry_initial_seconds,
+            runtime_config.bot.notification_retry_backoff_coefficient,
+            runtime_config.bot.history_repair_retry_max_seconds,
+        )
+        result = await asyncio.to_thread(
+            self.jobs.update_one,
+            {'_id': job_id, 'telegram_history_projection.state': 'claimed',
+             'telegram_history_projection.token': token},
+            {'$set': {
+                'telegram_history_projection.state': 'pending',
+                'telegram_history_projection.available_at': (
+                    datetime.now(timezone.utc) + timedelta(seconds=delay)
+                ),
+                'telegram_history_projection.lease_until': None,
+                'telegram_history_projection.error': str(error)[:runtime_config.bot.error_max_length],
+            }},
+        )
+        return result.matched_count == 1
+
+    async def retry_delivery(self, job_id, actor_id):
+        """Requeue only this owner's failed notification; rendering is untouched."""
+        import re
+        from imager_contracts.protocol import JOB_ID_PATTERN
+
+        if not isinstance(job_id, str) or not re.fullmatch(JOB_ID_PATTERN, job_id):
+            raise ValueError('Некорректный номер задания.')
+        result = await asyncio.to_thread(
+            self.jobs.update_one,
+            {'_id': job_id, 'request.client_id': 'telegram',
+             'request.client_context.user_id': actor_id,
+             'status': 'completed', 'result': {'$ne': None},
+             'completion_outbox.state': 'failed'},
+            {'$set': {
+                'completion_outbox.state': 'pending',
+                'completion_outbox.attempts': 0,
+                'completion_outbox.available_at': datetime.now(timezone.utc),
+                'completion_outbox.lease_until': None,
+                'completion_outbox.token': None,
+                'completion_outbox.error': None,
+                'completion_outbox.error_kind': None,
+                'completion_outbox.retry_requested_by': actor_id,
+                'completion_outbox.retry_requested_at': datetime.now(timezone.utc),
+            }},
+        )
+        if result.matched_count == 1:
+            service_logger.info(f'Telegram delivery retry requested: job_id={job_id}, actor_id={actor_id}')
+        return result.matched_count == 1
 
     def close(self):
         if self._mongo_client is not None:

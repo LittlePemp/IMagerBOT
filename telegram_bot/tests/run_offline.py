@@ -32,6 +32,7 @@ def main():
     from imager_config.loader import config
     configuration = types.ModuleType('settings')
     configuration.settings = SimpleNamespace(
+        telegram_admin_ids=(999,),
         tzinfo=timezone.utc,
         mongodb_uri='mongodb://127.0.0.1:1',
         imager_database_name='offline',

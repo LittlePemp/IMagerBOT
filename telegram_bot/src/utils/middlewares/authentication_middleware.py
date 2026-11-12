@@ -1,56 +1,37 @@
-from datetime import datetime
-
+"""Resolve a fresh principal for both messages and callbacks."""
 from aiogram import BaseMiddleware
-from aiogram.types import Message
-from src.utils.loggers import exception_logger
 from settings import settings
 from src.models.user import User, UserStatus
-from src.infrastructure.data.repositories.user_repository import UserRepository
-from src.utils.loggers import bot_requests_logger
 
 
 class AuthenticationMiddleware(BaseMiddleware):
-    def __init__(self, user_repository: UserRepository):
-        super().__init__()
+    def __init__(self, user_repository):
         self.user_repository = user_repository
 
-    async def __call__(self, handler, event: Message, data: dict):
-        user_id = event.from_user.id
-        username = event.from_user.username
-        full_name = event.from_user.full_name
-
-        user = await self.user_repository.get_user_by_id(user_id)
+    async def __call__(self, handler, event, data):
+        if event.from_user is None:
+            return
+        profile = event.from_user
+        user = await self.user_repository.get_user_by_id(profile.id)
+        fixed = profile.id in settings.telegram_admin_ids
         if user is None:
-            user_data = {
-                'telegram_username': username,
-                'telegram_id': user_id,
-                'name': full_name,
-                'registered_datetime_utc': datetime.now(settings.tzinfo),
-                'last_activity_datetime_utc': datetime.now(settings.tzinfo),
-                'isbanned': False,
-                'status': UserStatus.USER
-            }
-            user_result = User.create(**user_data)
-            if user_result.is_success:
-                user = user_result.value
-                success = await self.user_repository.add_user(user)
-                if success:
-                    bot_requests_logger.info(f'New user added: {user.telegram_id}')
-                    user = await self.user_repository.get_user_by_id(user_id)
-                else:
-                    exception_logger.error(f'Failed to add new user: {user.telegram_id}')
-                    return
-            else:
-                exception_logger.error(f'Failed to create user: {user_result.error}')
-                return
-        else:
-            await self.user_repository.update_user_info(user_id, username, full_name)
-
+            created = User.create(
+                telegram_id=profile.id, telegram_username=profile.username,
+                name=profile.full_name, isbanned=False,
+                status=UserStatus.ADMIN if fixed else UserStatus.USER,
+            )
+            if not created.is_success:
+                raise ValueError('Invalid Telegram profile')
+            await self.user_repository.add_user(created.value)
+            user = await self.user_repository.get_user_by_id(profile.id)
+            if user is None:
+                raise RuntimeError('Cannot confirm user registration')
+        if fixed:
+            user = user.model_copy(update={'status': UserStatus.ADMIN, 'isbanned': False})
         if user.isbanned:
-            exception_logger.warning(f'Blocked user attempted access: {user.telegram_id}')
             await event.answer('Вы заблокированы и не можете использовать этого бота.')
             return
-
-        bot_requests_logger.info(f'Authenticated user: {user.telegram_id}')
+        await self.user_repository.update_user_info(profile.id, profile.username, profile.full_name)
         data['user'] = user
+        data['user_repository'] = self.user_repository
         return await handler(event, data)

@@ -13,13 +13,14 @@ class UserStatus(str, Enum):
     PRIVILEGED = 'privileged'
 
 class User(BaseModel):
-    telegram_username: str
+    telegram_username: Optional[str] = None
     telegram_id: int
     name: Optional[str]
     registered_datetime_utc: datetime
     last_activity_datetime_utc: datetime
     isbanned: bool
     status: UserStatus
+    revision: int = 0
 
     @property
     def is_admin(self) -> bool:

@@ -1,98 +1,58 @@
+"""Disposable generation-history projection; storage errors are never empty data."""
 from datetime import datetime
 from typing import Optional
 
-from motor.motor_asyncio import AsyncIOMotorCollection
+from bson import ObjectId
+from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import DuplicateKeyError
 
 from settings import settings
 from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
-from src.utils.loggers import db_logger, exception_logger
 
 
 class GenerationHistoryRepository:
-    _instance = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(GenerationHistoryRepository, cls).__new__(cls)
-        return cls._instance
-
-    def __init__(self, collection: AsyncIOMotorCollection):
-        if hasattr(self, "_initialized") and self._initialized:
-            return
+    def __init__(self, collection: AsyncCollection):
         self.collection = collection
-        self._initialized = True
 
-    async def create_record(self, record: GenerationHistoryRecord) -> Optional[str]:
-        try:
-            document = record.model_dump()
-            if record.job_id:
-                from bson import ObjectId
+    async def initialize_indexes(self):
+        await self.collection.create_index(
+            'job_id', unique=True, partialFilterExpression={'job_id': {'$type': 'string'}},
+        )
+        await self.collection.create_index([('telegram_id', 1), ('created_at', -1)])
 
-                record_id = generation_history_record_id(record.job_id)
-                document['_id'] = ObjectId(record_id)
-                try:
-                    await self.collection.update_one(
-                        {'_id': document['_id']}, {'$setOnInsert': document}, upsert=True,
-                    )
-                except DuplicateKeyError:
-                    # Concurrent projections of the same accepted command
-                    # race on the same immutable Mongo identity.
-                    pass
-            else:
-                result = await self.collection.insert_one(document)
-                record_id = str(result.inserted_id)
-            db_logger.info(f"Generation history record created: {record_id}")
+    async def create_record(self, record: GenerationHistoryRecord) -> str:
+        document = record.model_dump()
+        if record.job_id:
+            record_id = generation_history_record_id(record.job_id)
+            document['_id'] = ObjectId(record_id)
+            try:
+                await self.collection.update_one(
+                    {'_id': document['_id']}, {'$setOnInsert': document}, upsert=True,
+                )
+            except DuplicateKeyError:
+                stored = await self.collection.find_one({'_id': document['_id']})
+                if stored is None or stored.get('job_id') != record.job_id:
+                    raise
             return record_id
-        except Exception as e:
-            exception_logger.error(f"Failed to create generation history record: {e}")
-            return None
+        result = await self.collection.insert_one(document)
+        return str(result.inserted_id)
 
     async def count_user_records(self, telegram_id: int) -> int:
-        try:
-            return await self.collection.count_documents({"telegram_id": telegram_id})
-        except Exception as e:
-            exception_logger.error(f"Failed to count generation history for user {telegram_id}: {e}")
-            return 0
+        return await self.collection.count_documents({'telegram_id': telegram_id})
 
     async def count_active_records(self) -> int:
-        try:
-            return await self.collection.count_documents({"status": {"$in": ["queued", "processing"]}})
-        except Exception as e:
-            exception_logger.error(f"Failed to count active generation history records: {e}")
-            return 0
+        return await self.collection.count_documents({'status': {'$in': ['queued', 'processing']}})
 
     async def update_record(
-        self,
-        record_id: str,
-        *,
-        status: str,
-        result_image_path: Optional[str] = None,
-        error_message: Optional[str] = None,
-        queue_position: Optional[int] = None,
+        self, record_id: str, *, status: str, result_image_path: Optional[str] = None,
+        error_message: Optional[str] = None, queue_position: Optional[int] = None,
     ) -> bool:
-        try:
-            update_data = {
-                "status": status,
-                "updated_at": datetime.now(settings.tzinfo),
-            }
-            if result_image_path is not None:
-                update_data["result_image_path"] = result_image_path
-            if error_message is not None:
-                update_data["error_message"] = error_message
-            if queue_position is not None:
-                update_data["queue_position"] = queue_position
-
-            from bson import ObjectId
-
-            result = await self.collection.update_one(
-                {"_id": ObjectId(record_id)},
-                {"$set": update_data},
-            )
-            if result.matched_count:
-                db_logger.info(f"Generation history record updated: {record_id}")
-                return True
-            return False
-        except Exception as e:
-            exception_logger.error(f"Failed to update generation history record {record_id}: {e}")
-            return False
+        fields = {'status': status, 'updated_at': datetime.now(settings.tzinfo)}
+        if result_image_path is not None:
+            fields['result_image_path'] = result_image_path
+        if error_message is not None:
+            fields['error_message'] = error_message
+        if queue_position is not None:
+            fields['queue_position'] = queue_position
+        result = await self.collection.update_one({'_id': ObjectId(record_id)}, {'$set': fields})
+        return bool(result.matched_count)

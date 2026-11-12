@@ -105,6 +105,8 @@ class RuntimeMongoConfig:
     bot_database: str
     jobs_collection: str
     catalog_collection: str
+    bot_admissions_collection: str
+    bot_fsm_collection: str
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,31 @@ class RuntimeBotConfig:
     result_size_min: int
     result_size_max: int
     regular_user_upload_limit: int
+    admission_poll_seconds: float
+    admission_lease_seconds: int
+    admission_retry_seconds: float
+    max_pending_jobs: int
+    max_concurrent_updates: int
+    max_concurrent_uploads: int
+    updates_per_second: float
+    updates_burst: int
+    global_updates_per_second: float
+    global_updates_burst: int
+    upload_cooldown_seconds: float
+    throttle_notice_seconds: float
+    throttle_user_capacity: int
+    throttle_idle_seconds: float
+    ui_page_size: int
+    ui_label_max_length: int
+    ui_name_max_length: int
+    ui_view_token_bytes: int
+    ui_view_ttl_seconds: float
+    history_repair_poll_seconds: float
+    history_repair_lease_seconds: int
+    history_repair_retry_initial_seconds: float
+    history_repair_retry_max_seconds: float
+    notification_retry_after_grace_seconds: float
+    notification_retry_jitter_ratio: float
 
 
 @dataclass(frozen=True)

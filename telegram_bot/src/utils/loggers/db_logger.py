@@ -1,5 +1,6 @@
 from loguru import logger
 from imager_config.loader import config
+from imager_contracts.protocol import LOG_EXCEPTION_LOCALS
 
 logger.add(
     'logs/database.log',
@@ -8,7 +9,8 @@ logger.add(
     level='DEBUG',
     format='{time:YYYY-MM-DD at HH:mm:ss} | {level} | {message}',
     filter=lambda record: record['extra'].get('name') == 'db_logger',
-    enqueue=True
+    enqueue=True,
+    diagnose=LOG_EXCEPTION_LOCALS,
 )
 
 db_logger = logger.bind(name='db_logger')

@@ -3,6 +3,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.commands.common_keyboards import add_home_button
+from src.utils.navigation import render_view
 
 
 def support_keyboard():
@@ -13,11 +14,13 @@ def support_keyboard():
     return builder.as_markup()
 
 
-async def show_support(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "Если что-то пошло не так, вернитесь в меню и повторите сценарий. "
-        "Для настройки параметров используйте админ-панель.",
-        reply_markup=support_keyboard(),
+async def show_support(callback: CallbackQuery, state):
+    await state.clear()
+    await render_view(callback, state,
+        "Для нового изображения откройте главное меню. "
+        "Если приём задания уточняется, сохраните его номер: повторный расчёт создавать не нужно. "
+        "Принятые задания продолжают выполняться после перезапуска бота.",
+        support_keyboard(),
     )
     await callback.answer()
 

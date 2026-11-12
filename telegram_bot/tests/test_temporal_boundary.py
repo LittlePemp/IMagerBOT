@@ -211,6 +211,7 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
                                'cell_size': 40, 'result_size': 120},
             },
             'completion_outbox': {'token': 'lease-1', 'attempts': 1},
+            'telegram_history_projection': {'token': 'history-lease', 'attempts': 1},
         }
         self.service = SimpleNamespace(
             config=self.config,
@@ -218,6 +219,9 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
             renew_completion=AsyncMock(return_value=True),
             acknowledge_completion=AsyncMock(return_value=True),
             fail_completion=AsyncMock(),
+            claim_history_projection=AsyncMock(return_value=self.job),
+            acknowledge_history_projection=AsyncMock(return_value=True),
+            fail_history_projection=AsyncMock(),
             object_store=SimpleNamespace(download_result=self.download),
         )
         self.paths = []
@@ -242,6 +246,7 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         self.service.fail_completion.assert_not_awaited()
         self.assertEqual(len(self.paths), 1)
         self.assertFalse(self.paths[0].exists())
+        await self.notifier.repair_history_once()
         self.assertEqual(
             self.history.update_record.await_args.kwargs['result_image_path'],
             's3://imager/jobs/job-1/attempts/token/result.jpg',
@@ -257,7 +262,8 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         self.job.update(status='failed', result=None, error='Invalid image')
         await self.notifier.deliver_once()
         self.bot.send_document.assert_not_awaited()
-        self.assertIn('Invalid image', self.bot.send_message.await_args.kwargs['text'])
+        self.assertNotIn('Invalid image', self.bot.send_message.await_args.kwargs['text'])
+        self.assertIn('job-1', self.bot.send_message.await_args.kwargs['text'])
         self.service.acknowledge_completion.assert_awaited_once_with('job-1', 'lease-1', 78)
 
     async def test_lost_delivery_lease_prevents_sending(self):
@@ -274,6 +280,7 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         collection = HistoryCollection()
         self.notifier.history_repository = history_repository(collection)
         await self.notifier.deliver_once()
+        await self.notifier.repair_history_once()
         self.assertEqual(len(collection.documents), 1)
         projection = next(iter(collection.documents.values()))
         self.assertEqual(projection['job_id'], 'job-1')
@@ -285,123 +292,28 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
 
 
 class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
-    async def test_photo_submission_returns_without_waiting_for_render(self):
-        from src.commands.image_generation import image_generation_handler as handler
-
-        service = SimpleNamespace(
-            get_job=AsyncMock(return_value=None),
-            upload_source=AsyncMock(return_value=reference()),
-            submit_generation=AsyncMock(),
-        )
-
-        async def download(remote, destination, **kwargs):
-            Path(destination).write_bytes(b'photo')
-
-        message = SimpleNamespace(
-            chat=SimpleNamespace(id=12), message_id=34,
-            photo=[SimpleNamespace(file_id='photo')],
-            bot=SimpleNamespace(
-                get_file=AsyncMock(return_value=SimpleNamespace(file_path='telegram/path')),
-                download_file=AsyncMock(side_effect=download),
-            ),
-            reply=AsyncMock(),
-        )
-        state = SimpleNamespace(
-            get_data=AsyncMock(return_value={
-                'image_group': 'animals', 'image_size': 120,
-                'noise_level': 15, 'inset_size': 40,
-            }),
-            clear=AsyncMock(),
-        )
-        user = SimpleNamespace(
-            telegram_id=1, telegram_username='alice', name='Alice', is_admin=True,
-        )
-        history_id = generation_history_record_id(handler._generation_job_id(message))
-        history = SimpleNamespace(create_record=AsyncMock(return_value=history_id))
-        with patch.object(handler, 'imager_service', service):
-            with patch.object(handler, '_set_processing_reaction', AsyncMock()):
-                await handler.receive_image(message, state, SimpleNamespace(generation_history_repository=history), user)
-        service.submit_generation.assert_awaited_once()
+    async def test_handler_uses_durable_admission_instead_of_direct_inbox_or_history(self):
+        from src.commands.image_generation import upload
+        from src.models.admission import AdmissionReceipt
+        message = SimpleNamespace(chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock())
+        state = SimpleNamespace(get_data=AsyncMock(return_value={'generation_mode': 'manual'}), clear=AsyncMock())
+        receipt = AdmissionReceipt('job-1', 'pending', '2026-11-12', 'hash', actor_id=1)
+        service = SimpleNamespace(execute=AsyncMock(return_value=receipt), gateway=object())
+        with patch.object(upload, 'render_view', AsyncMock()) as render:
+            await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service)
+        context = service.execute.await_args.kwargs['client_context']
+        self.assertEqual(context['chat_id'], 12)
+        self.assertEqual(context['reply_to_message_id'], 34)
+        self.assertIn('Изображение принято', render.await_args.args[2])
         state.clear.assert_awaited_once()
-        submitted = service.submit_generation.await_args
-        self.assertEqual(submitted.args[0].source['bucket'], 'imager')
-        self.assertEqual(submitted.kwargs['client_context']['chat_id'], 12)
-        self.assertEqual(submitted.kwargs['client_context']['history_record_id'], history_id)
-        self.assertTrue(history.create_record.await_args.args[0].source_image_path.startswith('s3://'))
-        self.assertIn('Изображение принято', message.reply.await_args.args[0])
 
-        # History is a repairable projection: its outage cannot revoke an
-        # already durable inbox command or produce a false rejection reply.
-        history.create_record.return_value = None
-        with patch.object(handler, 'imager_service', service):
-            with patch.object(handler, '_set_processing_reaction', AsyncMock()):
-                await handler.receive_image(message, state, SimpleNamespace(
-                    generation_history_repository=history), user)
-        self.assertIn('Изображение принято', message.reply.await_args.args[0])
-        self.assertEqual(state.clear.await_count, 2)
-
-    async def test_concurrent_duplicate_photo_submissions_share_one_inbox_and_history(self):
-        from src.commands.image_generation import image_generation_handler as handler
-
-        database = Database()
-        service = ImagerService(SimpleNamespace(), database=database)
-        service.upload_source = AsyncMock(return_value=reference())
-        barrier = asyncio.Event()
-        readers = 0
-
-        async def initially_missing(job_id):
-            nonlocal readers
-            if readers >= 2:
-                return database.jobs.find_one({'_id': job_id})
-            readers += 1
-            if readers == 2:
-                barrier.set()
-            await barrier.wait()
-            return None
-
-        service.get_job = AsyncMock(side_effect=initially_missing)
-        async def download(remote, destination, **kwargs):
-            Path(destination).write_bytes(b'photo')
-
-        message = SimpleNamespace(
-            chat=SimpleNamespace(id=12), message_id=34,
-            photo=[SimpleNamespace(file_id='photo')], reply=AsyncMock(),
-            bot=SimpleNamespace(
-                get_file=AsyncMock(return_value=SimpleNamespace(file_path='telegram/path')),
-                download_file=AsyncMock(side_effect=download),
-            ),
-        )
-        state = SimpleNamespace(get_data=AsyncMock(return_value={
-            'image_group': 'animals', 'image_size': 120, 'noise_level': 15, 'inset_size': 40,
-        }), clear=AsyncMock())
-        user = SimpleNamespace(telegram_id=1, telegram_username='alice', is_admin=True)
-        collection = HistoryCollection()
-        history = history_repository(collection)
-        with patch.object(handler, 'imager_service', service):
-            with patch.object(handler, '_set_processing_reaction', AsyncMock()):
-                await asyncio.gather(*[
-                    handler.receive_image(message, state, SimpleNamespace(
-                        generation_history_repository=history), user)
-                    for _ in range(2)
-                ])
-        self.assertEqual(len(database.jobs.documents), 1)
-        self.assertEqual(len(collection.documents), 1)
-        self.assertEqual(state.clear.await_count, 2)
-        for call in message.reply.await_args_list:
-            self.assertIn('Изображение принято', call.args[0])
-
-    async def test_existing_command_is_acknowledged_without_new_upload_or_history(self):
-        from src.commands.image_generation import image_generation_handler as handler
-
-        service = SimpleNamespace(
-            get_job=AsyncMock(return_value={'status': 'running'}),
-            upload_source=AsyncMock(),
-        )
-        message = SimpleNamespace(
-            chat=SimpleNamespace(id=12), message_id=34, photo=[object()], reply=AsyncMock(),
-        )
-        state = SimpleNamespace(clear=AsyncMock())
-        with patch.object(handler, 'imager_service', service):
-            await handler.receive_image(message, state, object(), object())
-        service.upload_source.assert_not_awaited()
-        self.assertIn('уже принято', message.reply.await_args.args[0])
+    async def test_daily_quota_rejection_keeps_draft_and_does_not_acknowledge_acceptance(self):
+        from src.commands.image_generation import upload
+        from src.infrastructure.data.errors import DailyQuotaExceeded
+        from datetime import datetime, timezone
+        message = SimpleNamespace(chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock())
+        state = SimpleNamespace(get_data=AsyncMock(return_value={}), clear=AsyncMock())
+        service = SimpleNamespace(execute=AsyncMock(side_effect=DailyQuotaExceeded(5, datetime.now(timezone.utc))), gateway=object())
+        await upload.receive_image(message, state, SimpleNamespace(telegram_id=1), service)
+        state.clear.assert_not_awaited()
+        self.assertIn('полночь', message.answer.await_args.args[0])

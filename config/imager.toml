@@ -88,6 +88,8 @@ core_database = "imager_core"
 bot_database = "telegram_bot"
 jobs_collection = "generation_jobs"
 catalog_collection = "catalog_groups"
+bot_admissions_collection = "bot_admissions"
+bot_fsm_collection = "conversation_states"
 
 [jobs]
 execution_lease_seconds = 60
@@ -163,6 +165,32 @@ cell_size_max = 200
 result_size_min = 1
 result_size_max = 300
 regular_user_upload_limit = 5
+# Calendar days use bot.timezone; quota applies to every Telegram account.
+admission_poll_seconds = 1.0
+admission_lease_seconds = 60
+admission_retry_seconds = 3.0
+max_pending_jobs = 64
+max_concurrent_updates = 32
+max_concurrent_uploads = 2
+updates_per_second = 2.0
+updates_burst = 6
+global_updates_per_second = 20.0
+global_updates_burst = 40
+upload_cooldown_seconds = 10.0
+throttle_notice_seconds = 10.0
+throttle_user_capacity = 10000
+throttle_idle_seconds = 3600.0
+ui_page_size = 8
+ui_label_max_length = 64
+ui_name_max_length = 128
+ui_view_token_bytes = 6
+ui_view_ttl_seconds = 1800.0
+history_repair_poll_seconds = 5.0
+history_repair_lease_seconds = 60
+history_repair_retry_initial_seconds = 5.0
+history_repair_retry_max_seconds = 300.0
+notification_retry_after_grace_seconds = 1.0
+notification_retry_jitter_ratio = 0.2
 
 [generation]
 insertion_format = "crop"

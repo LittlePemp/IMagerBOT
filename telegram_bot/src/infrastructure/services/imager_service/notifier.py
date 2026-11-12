@@ -8,6 +8,7 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from imager_config.loader import config
@@ -20,6 +21,7 @@ class GenerationNotifier:
         self.service = service
         self.bot = bot
         self.history_repository = history_repository
+        self._telegram_resume_at = 0.0
 
     async def _renew(self, job_id, token, lost):
         interval = max(
@@ -38,37 +40,20 @@ class GenerationNotifier:
                 return
 
     async def deliver_once(self):
+        if asyncio.get_running_loop().time() < self._telegram_resume_at:
+            return False
         job = await self.service.claim_completion()
         if job is None:
             return False
         job_id = job['_id']
         outbox = job['completion_outbox']
         token = outbox['token']
-        context = job['request']['client_context']
         lost = asyncio.Event()
         renewal = asyncio.create_task(self._renew(job_id, token, lost))
         try:
+            context = job['request']['client_context']
             chat_id = context['chat_id']
-            history_id = context.get('history_record_id')
-            error = str(job.get('error') or 'Не удалось собрать изображение.')
             result = job.get('result')
-            if history_id:
-                if history_id != generation_history_record_id(job_id):
-                    raise ValueError('Accepted job has an inconsistent history identity')
-                ensured = await self.history_repository.create_record(GenerationHistoryRecord.from_job(job))
-                if ensured != history_id:
-                    raise RuntimeError('Cannot restore generation history before notification')
-                updated = await self.history_repository.update_record(
-                    history_id,
-                    status=job['status'],
-                    result_image_path=(
-                        f"s3://{result['bucket']}/{result['key']}" if result else None
-                    ),
-                    error_message=error if job['status'] == 'failed' else None,
-                    queue_position=0,
-                )
-                if not updated:
-                    raise RuntimeError('Cannot update generation history before notification')
             if job['status'] == 'completed':
                 if not result:
                     raise ValueError('Completed job has no result object')
@@ -93,7 +78,10 @@ class GenerationNotifier:
                     raise RuntimeError('Delivery lease was lost before sending the notification')
                 message = await self.bot.send_message(
                     chat_id=chat_id,
-                    text=f'Не удалось собрать изображение.\nЗадание: {job_id}\n{error[:config.bot.error_excerpt_length]}',
+                    text=(
+                        f'Не удалось собрать изображение.\nЗадание: {job_id}\n'
+                        'Попробуйте другие параметры или обратитесь в поддержку с номером задания.'
+                    ),
                 )
             acknowledged = await self.service.acknowledge_completion(
                 job_id, token, message.message_id
@@ -107,6 +95,12 @@ class GenerationNotifier:
             # A later notifier can reclaim the event after its lease expires.
             raise
         except Exception as error:
+            if isinstance(error, TelegramRetryAfter):
+                # A conservative process-wide pause also protects other chats
+                # while Telegram applies a bot-wide FloodWait.
+                self._telegram_resume_at = asyncio.get_running_loop().time() + (
+                    max(error.retry_after, 0) + config.bot.notification_retry_after_grace_seconds
+                )
             exception_logger.exception(f'Telegram result delivery failed: job_id={job_id}')
             await self.service.fail_completion(job_id, token, outbox['attempts'], error)
         finally:
@@ -115,7 +109,48 @@ class GenerationNotifier:
                 await renewal
         return True
 
-    async def run(self, stop):
+    async def repair_history_once(self):
+        """History is a disposable projection, never a prerequisite for sending."""
+        job = await self.service.claim_history_projection()
+        if job is None:
+            return False
+        job_id = job['_id']
+        projection = job['telegram_history_projection']
+        token = projection['token']
+        try:
+            context = job['request']['client_context']
+            history_id = context['history_record_id']
+            if history_id != generation_history_record_id(job_id):
+                raise ValueError('Accepted job has an inconsistent history identity')
+            ensured = await self.history_repository.create_record(GenerationHistoryRecord.from_job(job))
+            if ensured != history_id:
+                raise RuntimeError('Cannot restore generation history projection')
+            result = job.get('result')
+            updated = await self.history_repository.update_record(
+                history_id,
+                status=job['status'],
+                result_image_path=f"s3://{result['bucket']}/{result['key']}" if result else None,
+                error_message=str(job.get('error') or '') if job['status'] == 'failed' else None,
+            )
+            if not updated:
+                raise RuntimeError('Cannot update generation history projection')
+            if not await self.service.acknowledge_history_projection(job_id, token):
+                raise RuntimeError('History projection lease was lost before acknowledgement')
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            exception_logger.exception(f'Generation history repair failed: job_id={job_id}')
+            await self.service.fail_history_projection(job_id, token, projection['attempts'], error)
+        return True
+
+    @staticmethod
+    async def _wait(stop, seconds):
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _delivery_loop(self, stop):
         while not stop.is_set():
             try:
                 if await self.deliver_once():
@@ -124,9 +159,20 @@ class GenerationNotifier:
                 raise
             except Exception:
                 exception_logger.exception('Telegram completion inbox polling failed')
+            await self._wait(stop, self.service.config.bot_notification_poll_seconds)
+
+    async def _history_loop(self, stop):
+        while not stop.is_set():
             try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=self.service.config.bot_notification_poll_seconds
-                )
-            except asyncio.TimeoutError:
-                pass
+                if await self.repair_history_once():
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                exception_logger.exception('Generation history repair polling failed')
+            await self._wait(stop, config.bot.history_repair_poll_seconds)
+
+    async def run(self, stop):
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(self._delivery_loop(stop), name='telegram-delivery')
+            tasks.create_task(self._history_loop(stop), name='generation-history-repair')

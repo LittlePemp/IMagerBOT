@@ -1,140 +1,103 @@
 from functools import partial
 
-from aiogram import Dispatcher, types
-from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery
+from aiogram import Dispatcher, F
 
-from src.commands.admin_panel.image_build_params.common_params.common_params_keyboard import (
-    common_back_keyboard,
-    common_delete_keyboard,
-    common_parameter_keyboard,
-)
-from src.commands.admin_panel.image_build_params.common_params.common_params_states import (
-    CommonParamsStates,
-)
-from src.infrastructure.data.unit_of_work import MongoUnitOfWork
-from src.models.image_build_params import CommonParam, ParamType
+from src.models.image_build_params import CommonParam, ParamType, validate_display_name
+from src.utils.filters.request_filters.admin_filter import AdminFilter
+from ...ui import AdminCallback, authorize_change, command, page_buttons, page_slice, show
+from .common_params_states import CommonParamsStates
 
 
-async def show_param_details(callback: CallbackQuery, uow: MongoUnitOfWork):
-    param_type = callback.data.split('-')[1]
-    async with uow:
-        params_result = await uow.image_build_params_repository.get_common_params(ParamType(param_type))
-        if params_result.is_success:
-            params = params_result.value
-            parameter_details = f'Параметры для "{param_type}":\n' + '\n'.join(
-                [f'{param.name}: {param.value}' for param in params]
-            )
-            await callback.message.edit_text(
-                parameter_details,
-                reply_markup=common_parameter_keyboard(param_type)
-            )
-        else:
-            await callback.message.edit_text(
-                f'Не удалось получить параметры для "{param_type}".',
-                reply_markup=common_parameter_keyboard(param_type)
-            )
-    await callback.answer()
+PARAM_TYPES = (ParamType.IMAGE_SIZE, ParamType.NOISE_LEVEL, ParamType.INSET_SIZE)
+PARAM_NAMES = ('Размер результата', 'Уровень шума', 'Размер ячейки')
 
 
-async def add_param(callback: CallbackQuery, state: FSMContext):
-    param_type = callback.data.split('-')[0]
-    await state.update_data(param_type=param_type)
-    await callback.message.edit_text(
-        f'Введите название для нового значения параметра "{param_type}":',
-        reply_markup=common_back_keyboard()
+async def render_presets(event, state, uow, type_index, page=0):
+    param_type = PARAM_TYPES[type_index]
+    rows = await uow.image_build_params_repository.get_admin_params(param_type)
+    page, last, visible = page_slice(rows, page)
+    records = {str(index): {'record_id': row['record_id']} for index, row in visible}
+    buttons = [(f"Удалить: {row.get('name', 'Без названия')} = {row.get('value', '?')}", 'preset_remove', index)
+               for index, row in visible]
+    buttons.extend(page_buttons(page, last, 'preset_page'))
+    buttons.extend([('Добавить', 'preset_add', 0), ('Назад', 'params', 0)])
+    await show(
+        event, state,
+        f'{PARAM_NAMES[type_index]}. Страница {page + 1}/{last + 1}.\n'
+        'Выберите значение для удаления или добавьте новое.',
+        buttons, records=records, context={'type_index': type_index, 'page': page},
     )
-    await state.set_state(CommonParamsStates.waiting_for_name)
-    await callback.answer()
 
 
-async def receive_param_name(message: types.Message, state: FSMContext):
-    await state.update_data(param_name=message.text)
-    await message.answer(
-        f'Введите числовое значение для параметра "{message.text}":',
-        reply_markup=common_back_keyboard()
-    )
-    await state.set_state(CommonParamsStates.waiting_for_value)
+async def show_param_details(callback, state, uow):
+    action = await command(callback, state)
+    if action and 0 <= action.item < len(PARAM_TYPES):
+        await render_presets(callback, state, uow, action.item)
 
 
-async def receive_param_value(message: types.Message, state: FSMContext, uow: MongoUnitOfWork):
-    data = await state.get_data()
-    param_type = data['param_type']
-    param_name = data['param_name']
-    raw_value = (message.text or '').strip()
+async def change_page(callback, state, uow):
+    action = await command(callback, state)
+    if action:
+        await render_presets(callback, state, uow, action.context['type_index'], action.item)
 
+
+async def add_param(callback, state):
+    action = await command(callback, state)
+    if action:
+        await show(callback, state, 'Введите название нового варианта:', [
+            ('Назад', 'preset_list', action.context['type_index']),
+        ], context=action.context, fsm=CommonParamsStates.waiting_for_name)
+
+
+async def receive_param_name(message, state):
+    snapshot = await state.get_data()
+    context = snapshot['admin_context']
     try:
-        numeric_value = float(raw_value.replace(',', '.'))
-    except ValueError:
-        await message.answer(
-            'Значение должно быть числом. Например: 40 или 12.5',
-            reply_markup=common_back_keyboard()
-        )
+        name = validate_display_name(message.text)
+    except ValueError as error:
+        await message.answer(str(error))
         return
-
-    param = CommonParam(name=param_name, value=numeric_value, type=ParamType(param_type))
-    async with uow:
-        param_result = await uow.image_build_params_repository.add_common_param(param)
-        if param_result.is_success:
-            await message.answer(
-                f'Параметр "{param_name}" со значением "{numeric_value}" добавлен для типа "{param_type}".',
-                reply_markup=common_back_keyboard()
-            )
-        else:
-            await message.answer(
-                f'Не удалось добавить параметр "{param_name}" для типа "{param_type}".',
-                reply_markup=common_back_keyboard()
-            )
-        await uow.commit()
-    await state.clear()
+    context = dict(context, param_name=name)
+    await show(message, state, 'Введите целое числовое значение:', [
+        ('Назад', 'preset_list', context['type_index']),
+    ], context=context, fsm=CommonParamsStates.waiting_for_value)
 
 
-async def delete_param(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
-    param_type = callback.data.split('-')[0]
-    async with uow:
-        params_result = await uow.image_build_params_repository.get_common_params(ParamType(param_type))
-        if params_result.is_success:
-            params = params_result.value
-            await callback.message.edit_text(
-                f'Выберите параметр для удаления из "{param_type}":',
-                reply_markup=common_delete_keyboard(params, param_type)
-            )
-        else:
-            await callback.message.edit_text(
-                f'Не удалось получить параметры для "{param_type}".',
-                reply_markup=common_back_keyboard()
-            )
-    await state.set_state(CommonParamsStates.waiting_for_deletion_choice)
-    await callback.answer()
+async def receive_param_value(message, state, uow):
+    context = (await state.get_data())['admin_context']
+    result = CommonParam.create(
+        name=context['param_name'], value=message.text,
+        type=PARAM_TYPES[context['type_index']],
+    )
+    if not result.is_success:
+        await message.answer(result.error)
+        return
+    await authorize_change(message, uow.user_repository)
+    saved = await uow.image_build_params_repository.add_common_param(result.value)
+    if not saved.is_success:
+        await message.answer(saved.error)
+        return
+    await render_presets(message, state, uow, context['type_index'], context.get('page', 0))
 
 
-async def confirm_delete_param(callback: CallbackQuery, state: FSMContext, uow: MongoUnitOfWork):
-    _, param_type, param_name = callback.data.split('-', 2)
-
-    async with uow:
-        delete_result = await uow.image_build_params_repository.delete_common_param(
-            ParamType(param_type),
-            param_name
+async def confirm_delete_param(callback, state, uow):
+    action = await command(callback, state)
+    if action is None:
+        return
+    if action.record:
+        await authorize_change(callback, uow.user_repository)
+        await uow.image_build_params_repository.delete_by_id(
+            action.record['record_id'], PARAM_TYPES[action.context['type_index']],
         )
-        if delete_result.is_success:
-            await callback.message.edit_text(
-                f'Параметр "{param_name}" удален из типа "{param_type}".',
-                reply_markup=common_back_keyboard()
-            )
-        else:
-            await callback.message.edit_text(
-                f'Не удалось удалить параметр "{param_name}" из типа "{param_type}".',
-                reply_markup=common_back_keyboard()
-            )
-        await uow.commit()
-    await state.clear()
-    await callback.answer()
+    await render_presets(callback, state, uow, action.context['type_index'], action.context.get('page', 0))
 
 
-def register_handlers_common_params(dp: Dispatcher, uow: MongoUnitOfWork):
-    dp.callback_query.register(partial(show_param_details, uow=uow), lambda c: c.data.startswith('param-'))
-    dp.callback_query.register(add_param, lambda c: c.data.endswith('-add'))
-    dp.callback_query.register(partial(delete_param, uow=uow), lambda c: c.data.endswith('-delete'))
-    dp.callback_query.register(partial(confirm_delete_param, uow=uow), lambda c: c.data.startswith('delete-'))
-    dp.message.register(receive_param_name, CommonParamsStates.waiting_for_name)
-    dp.message.register(partial(receive_param_value, uow=uow), CommonParamsStates.waiting_for_value)
+def register_handlers_common_params(dp: Dispatcher, uow):
+    for handler, action in (
+        (show_param_details, 'preset_list'), (change_page, 'preset_page'),
+        (confirm_delete_param, 'preset_remove'),
+    ):
+        dp.callback_query.register(partial(handler, uow=uow), AdminCallback.filter(F.action == action), AdminFilter())
+    dp.callback_query.register(add_param, AdminCallback.filter(F.action == 'preset_add'), AdminFilter())
+    dp.message.register(receive_param_name, CommonParamsStates.waiting_for_name, AdminFilter())
+    dp.message.register(partial(receive_param_value, uow=uow), CommonParamsStates.waiting_for_value, AdminFilter())

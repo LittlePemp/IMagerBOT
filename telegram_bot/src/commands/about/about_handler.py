@@ -3,6 +3,7 @@ from aiogram.types import CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.commands.common_keyboards import add_home_button
+from src.utils.navigation import render_view
 
 
 def about_keyboard():
@@ -13,10 +14,11 @@ def about_keyboard():
     return builder.as_markup()
 
 
-async def show_about(callback: CallbackQuery):
-    await callback.message.edit_text(
+async def show_about(callback: CallbackQuery, state):
+    await state.clear()
+    await render_view(callback, state,
         "IMager BOT собирает изображения из набора маленьких картинок и формирует мозаику.",
-        reply_markup=about_keyboard(),
+        about_keyboard(),
     )
     await callback.answer()
 

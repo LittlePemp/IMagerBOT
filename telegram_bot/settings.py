@@ -1,8 +1,9 @@
 import os
 from zoneinfo import ZoneInfo
+from typing import Annotated
 
-from pydantic import SecretStr, Field
-from pydantic_settings import BaseSettings
+from pydantic import SecretStr, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
 
 from imager_config.loader import config
 
@@ -12,7 +13,8 @@ class Settings(BaseSettings):
     mongodb_uri: str
     rabbitmq_url: str = config.legacy.rabbitmq_url
     rabbitmq_requests_queue: str = config.legacy.rabbitmq_requests_queue
-    telegram_admin_ids: str  # List read fix
+    telegram_admin_ids: Annotated[tuple[int, ...], NoDecode]
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
     database_name: str = config.mongo.bot_database
     imager_database_name: str = config.mongo.core_database
     minio_endpoint: str = config.storage.endpoint
@@ -42,19 +44,24 @@ class Settings(BaseSettings):
     generation_estimated_jpeg_bytes_per_pixel: float = config.render.estimated_jpeg_bytes_per_pixel
     regular_user_upload_limit: int = config.bot.regular_user_upload_limit
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.telegram_admin_ids = [int(x) for x in self.telegram_admin_ids.split('|')]
+    @field_validator('telegram_admin_ids', mode='before')
+    @classmethod
+    def parse_fixed_administrators(cls, value):
+        values = value.split('|') if isinstance(value, str) else value
+        result = tuple(dict.fromkeys(int(item) for item in values))
+        if not result or any(item <= 0 for item in result):
+            raise ValueError('Configure at least one positive permanent administrator ID')
+        return result
+
+    @model_validator(mode='after')
+    def validate_notification_lease(self):
         renew_interval = max(
             config.bot.notification_renew_min_seconds,
             self.bot_notification_lease_seconds / config.bot.notification_renew_divisor,
         )
         if renew_interval >= self.bot_notification_lease_seconds:
             raise ValueError('Notification renewal interval must fit inside its lease')
-
-    class Config:
-        env_file = '.env'
-        env_file_encoding = 'utf-8'
+        return self
 
     def create_directories(self):
         os.makedirs(self.image_groups_relative_path, exist_ok=True)
