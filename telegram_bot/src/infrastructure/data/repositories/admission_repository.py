@@ -14,6 +14,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.write_concern import WriteConcern
 
+from imager_config.loader import config
 from imager_contracts import JobRequest, payload_fingerprint
 from src.infrastructure.data.errors import AdmissionConflict, AdmissionUncertain, DailyQuotaExceeded
 from src.models.admission import AdmissionClaim, AdmissionReceipt
@@ -39,6 +40,10 @@ class AdmissionRepository:
             ('actor_id', 1), ('date', -1), ('last_admitted_at', -1), ('created_at', -1),
         ])
         await self.collection.create_index([('actor_id', 1), ('date', 1), ('quota_exempt', 1)])
+        await self.collection.create_index([
+            ('admissions.state', 1), ('admissions.admin_notice.state', 1),
+            ('admissions.admin_notice.next_attempt_at', 1),
+        ])
 
     @staticmethod
     def _now(now):
@@ -152,6 +157,9 @@ class AdmissionRepository:
             'document': deepcopy(document), 'state': 'pending', 'attempts': 0,
             'token': None, 'lease_until': moment, 'next_attempt_at': moment,
             'accepted_at': moment, 'last_error': None,
+            # Created with acceptance, so uncertain acknowledgements and replay
+            # cannot lose or duplicate the notification. Legacy entries lack it.
+            'admin_notice': {'state': 'pending', 'recipients': None, 'next_attempt_at': moment},
         }
         try:
             await self.ensure_day(actor_id, now=moment)
@@ -287,3 +295,156 @@ class AdmissionRepository:
             'admissions.$.last_error': str(error)[:error_max_length],
         }})
         return bool(result.matched_count)
+
+    async def next_admin_notice(self, now=None):
+        """Only new, core-published admissions produce administrator notices."""
+        moment = self._now(now)
+        eligible = {
+            'state': 'sent', 'admin_notice.state': 'pending',
+            'admin_notice.next_attempt_at': {'$lte': moment},
+        }
+        cursor = await self.collection.aggregate([
+            {'$match': {'admissions': {'$elemMatch': eligible}}},
+            {'$unwind': '$admissions'},
+            {'$match': {f'admissions.{key}': value for key, value in eligible.items()}},
+            {'$sort': {'admissions.accepted_at': 1, 'admissions.job_id': 1}},
+            {'$limit': 1},
+            {'$project': {
+                '_id': 0, 'actor_id': 1, 'job_id': '$admissions.job_id',
+                'document': '$admissions.document', 'accepted_at': '$admissions.accepted_at',
+                'admin_notice': '$admissions.admin_notice',
+            }},
+        ])
+        rows = await cursor.to_list(length=1)
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _admin_recipient_key(admin_id):
+        if type(admin_id) is not int or admin_id <= 0:
+            raise ValueError('Administrator identity must be a positive integer')
+        return str(admin_id)
+
+    @staticmethod
+    def _notice_filter(job_id, **conditions):
+        return {'admissions': {'$elemMatch': {'job_id': job_id, **conditions}}}
+
+    async def initialize_admin_notice(self, job_id, recipient_ids, now=None):
+        """Freeze the fanout once; an empty recipient set is also initialized."""
+        moment = self._now(now)
+        keys = sorted({self._admin_recipient_key(admin_id) for admin_id in recipient_ids})
+        result = await self.collection.update_one(
+            self._notice_filter(job_id, state='sent', **{
+                'admin_notice.state': 'pending', 'admin_notice.recipients': None,
+            }),
+            {'$set': {
+                'admissions.$.admin_notice.recipients': {
+                    key: {'state': 'pending', 'next_attempt_at': moment} for key in keys
+                },
+                'admissions.$.admin_notice.next_attempt_at': moment,
+                'admissions.$.admin_notice.updated_at': moment,
+            }},
+        )
+        return bool(result.matched_count)
+
+    async def claim_admin_notice_recipient(self, job_id, admin_id, now=None):
+        """Reserve one non-repeatable attempt before Telegram I/O.
+
+        A process may die after Telegram accepted its request. Uncertain is a
+        terminal state unless Telegram explicitly rejected the send (429).
+        """
+        moment = self._now(now)
+        path = f'admin_notice.recipients.{self._admin_recipient_key(admin_id)}'
+        result = await self.collection.update_one(
+            self._notice_filter(job_id, state='sent', **{
+                'admin_notice.state': 'pending', f'{path}.state': 'pending',
+                f'{path}.next_attempt_at': {'$lte': moment},
+            }),
+            {'$set': {
+                f'admissions.$.{path}.state': 'uncertain',
+                f'admissions.$.{path}.attempted_at': moment,
+                'admissions.$.admin_notice.updated_at': moment,
+            }},
+        )
+        return bool(result.matched_count)
+
+    async def update_admin_notice_recipient(
+        self, job_id, admin_id, *, state, message_id=None, error=None, retry_at=None, now=None,
+    ):
+        """Record a known result; pending is reserved for a definite FloodWait."""
+        moment = self._now(now)
+        path = f'admin_notice.recipients.{self._admin_recipient_key(admin_id)}'
+        if state not in {'sent', 'failed', 'uncertain', 'pending'}:
+            raise ValueError('Unsupported administrator notification state')
+        if message_id is not None and (type(message_id) is not int or message_id <= 0):
+            raise ValueError('Telegram message identity must be a positive integer')
+        if state == 'pending':
+            if retry_at is None:
+                raise ValueError('A definite Telegram rejection requires a retry time')
+            retry_at = self._now(retry_at)
+        elif retry_at is not None:
+            raise ValueError('Only a definite Telegram rejection can be retried')
+        fields = {
+            f'admissions.$.{path}.state': state,
+            f'admissions.$.{path}.updated_at': moment,
+            'admissions.$.admin_notice.updated_at': moment,
+        }
+        if message_id is not None:
+            fields[f'admissions.$.{path}.message_id'] = message_id
+        if error is not None:
+            fields[f'admissions.$.{path}.error'] = str(error)[:config.bot.error_max_length]
+        update = {'$set': fields}
+        if state == 'pending':
+            fields[f'admissions.$.{path}.next_attempt_at'] = retry_at
+            # A different consumer may have finalized the uncertain attempt.
+            # Reopen only this definite rejection. Keep an earlier due sibling.
+            fields['admissions.$.admin_notice.state'] = 'pending'
+            update['$min'] = {'admissions.$.admin_notice.next_attempt_at': retry_at}
+        result = await self.collection.update_one(
+            self._notice_filter(job_id, **{f'{path}.state': 'uncertain'}), update,
+        )
+        return bool(result.matched_count)
+
+    async def skip_admin_notice_recipient(self, job_id, admin_id, now=None):
+        moment = self._now(now)
+        path = f'admin_notice.recipients.{self._admin_recipient_key(admin_id)}'
+        result = await self.collection.update_one(
+            self._notice_filter(job_id, **{
+                'admin_notice.state': 'pending', f'{path}.state': 'pending',
+            }),
+            {'$set': {
+                f'admissions.$.{path}.state': 'skipped',
+                f'admissions.$.{path}.updated_at': moment,
+                'admissions.$.admin_notice.updated_at': moment,
+            }},
+        )
+        return bool(result.matched_count)
+
+    async def complete_admin_notice(self, job_id, now=None):
+        """Finalize terminal fanout or defer to its earliest pending recipient.
+
+        Matching the observed whole recipient map prevents a concurrent send or
+        definite-rejection retry from being overwritten by this finalization.
+        """
+        moment = self._now(now)
+        found = await self._find_entry(job_id)
+        if found is None:
+            return False
+        notice = found[1].get('admin_notice')
+        if not notice or notice.get('state') != 'pending' or notice.get('recipients') is None:
+            return False
+        recipients = notice['recipients']
+        pending = [entry['next_attempt_at'] for entry in recipients.values() if entry['state'] == 'pending']
+        fields = {'admissions.$.admin_notice.updated_at': moment}
+        if pending:
+            fields['admissions.$.admin_notice.next_attempt_at'] = min(pending)
+        else:
+            fields.update({
+                'admissions.$.admin_notice.state': 'done',
+                'admissions.$.admin_notice.completed_at': moment,
+            })
+        result = await self.collection.update_one(
+            self._notice_filter(job_id, **{
+                'admin_notice.state': 'pending', 'admin_notice.recipients': recipients,
+            }), {'$set': fields},
+        )
+        return bool(result.matched_count) and not pending

@@ -20,6 +20,7 @@ from loguru import logger
 from imager_config.loader import config
 from settings import settings
 from src.application.admission import AdmissionDispatcher
+from src.application.admin_generation_notifications import AdminGenerationNotifications
 from src.application.generation import SubmitGeneration
 from src.application.generation_progress import GenerationProgress
 from src.application.generation_result_menu import GenerationResultMenu
@@ -142,9 +143,14 @@ async def main():
             progress=progress, on_result_delivered=result_menu,
         )
         admission = AdmissionDispatcher(repositories.admission_repository, imager_service, publication_lock=gate.admission_lock)
+        admin_notifications = AdminGenerationNotifications(
+            repositories.admission_repository, repositories.user_repository,
+            repositories.image_group_repository, bot, fixed_admin_ids=settings.telegram_admin_ids,
+        )
         projection = CatalogImportProjection(imports, repositories.image_group_repository)
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
-                 asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop))]
+                 asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop)),
+                 asyncio.create_task(admin_notifications.run(stop))]
         await bot.delete_webhook(drop_pending_updates=False)
         await dispatcher.start_polling(
             bot, close_bot_session=False, allowed_updates=['message', 'callback_query'],
