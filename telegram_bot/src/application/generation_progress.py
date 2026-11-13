@@ -6,6 +6,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, Teleg
 from aiogram.types import ReactionTypeEmoji
 
 from imager_config.loader import config
+from src.application.image_errors import BUILD_FAILED_TEXT, format_generation_error
 from src.utils.loggers import exception_logger
 
 
@@ -16,7 +17,6 @@ BUILDING_TEXT = '🧩 Собираю изображение…'
 RENDERING_TEXT = '🧩 Собираю изображение: {percent}%'
 DELIVERING_TEXT = '📤 Отправляю изображение…'
 DONE_TEXT = '✅ Готово!'
-BUILD_FAILED_TEXT = 'Не получилось собрать изображение 😔'
 DELIVERY_FAILED_TEXT = 'Ой, изображение не дошло 😔'
 DELIVERY_UNCERTAIN_TEXT = 'Не удалось проверить, дошло ли изображение 😔'
 ADMISSION_FAILED_TEXT = 'Не удалось подтвердить приём фото 😔'
@@ -57,7 +57,7 @@ class GenerationProgress:
                 return RENDERING_TEXT.format(percent=min(100, max(0, completed * 100 // total))), False
             return BUILDING_TEXT, False
         if job['status'] == 'failed':
-            return BUILD_FAILED_TEXT, True
+            return format_generation_error(job), True
         delivery = (job.get('completion_outbox') or {}).get('state')
         if delivery == 'sent':
             return DONE_TEXT, True
@@ -132,10 +132,11 @@ class GenerationProgress:
         record = await self.repository.get(job['_id'])
         if record is None:
             return None
-        message_id = await self._edit(record, BUILD_FAILED_TEXT, finished=True)
+        text = format_generation_error(job)
+        message_id = await self._edit(record, text, finished=True)
         if message_id is None:
             current = await self.repository.get(job['_id'])
-            if current and current.get('finished') and current['last_text'] == BUILD_FAILED_TEXT:
+            if current and current.get('finished') and current['last_text'] == text:
                 return current['message_id']
             if current is not None and not current.get('finished'):
                 raise ProgressUpdateUncertain('Cannot confirm the generation failure edit')

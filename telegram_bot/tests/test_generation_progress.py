@@ -11,6 +11,7 @@ from src.application.generation_progress import (
     GenerationProgress, QUEUE_TEXT, BUILDING_TEXT, RENDERING_TEXT, DONE_TEXT,
     DELIVERY_FAILED_TEXT, DELIVERY_UNCERTAIN_TEXT, BUILD_FAILED_TEXT,
 )
+from src.application.image_errors import IMAGE_TOO_NARROW_TEXT, IMAGE_TOO_WIDE_TEXT
 
 
 class Messages:
@@ -165,6 +166,30 @@ class GenerationProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.progress.fail_generation(failed), 40)
         self.assertEqual(await self.progress.fail_generation(failed), 40)
         self.bot.edit_message_text.assert_awaited_once_with(chat_id=5, message_id=40, text=BUILD_FAILED_TEXT)
+
+    async def test_narrow_failure_updates_original_message_and_notifier_does_not_duplicate_it(self):
+        await self.watch()
+        failed = self.job(status='failed', error=(
+            'Invalid image: Image aspect ratio 0.4594 must be between 0.5625 and 1.7778'
+        ))
+        self.gateway.progress_jobs.return_value = [failed]
+        await self.progress.poll_once()
+        self.assertEqual(await self.progress.fail_generation(failed), 40)
+        self.bot.edit_message_text.assert_awaited_once_with(
+            chat_id=5, message_id=40, text=IMAGE_TOO_NARROW_TEXT,
+        )
+        self.message.reply.assert_awaited_once()
+
+    async def test_wide_failure_notifier_first_edits_original_message(self):
+        await self.watch()
+        failed = self.job(status='failed', error=(
+            'Invalid image: Image aspect ratio 2.0000 must be between 0.5625 and 1.7778'
+        ))
+        self.assertEqual(await self.progress.fail_generation(failed), 40)
+        self.assertEqual(await self.progress.fail_generation(failed), 40)
+        self.bot.edit_message_text.assert_awaited_once_with(
+            chat_id=5, message_id=40, text=IMAGE_TOO_WIDE_TEXT,
+        )
 
     async def test_disabled_reaction_does_not_lose_accepted_progress(self):
         self.bot.set_message_reaction.side_effect = RuntimeError('reactions disabled')

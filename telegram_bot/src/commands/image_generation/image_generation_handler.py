@@ -22,4 +22,4 @@ def register_handlers_image_generation(dp, uow):
         S.waiting_manual_image_size, S.waiting_manual_noise_level, S.waiting_manual_inset_size,
         S.selecting_image_group, S.waiting_for_image_upload,
     ))
-    dp.message.register(receive_image, F.photo, S.waiting_for_image_upload)
+    dp.message.register(receive_image, F.photo | F.sticker, S.waiting_for_image_upload)

@@ -1,11 +1,14 @@
-"""Telegram source transfer and the small photo handler."""
+"""Bounded Telegram photo/sticker transfer and source admission."""
 import tempfile
 import shutil
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 from imager_config.loader import config
-from imager_contracts.protocol import TELEGRAM_JOB_ID_NAMESPACE
+from imager_contracts.protocol import (
+    BINARY_CONTENT_TYPE, JPEG_CONTENT_TYPE, WEBP_CONTENT_TYPE, TELEGRAM_JOB_ID_NAMESPACE,
+)
+from src.application.image_errors import image_aspect_error
 from src.commands.common_keyboards import home_keyboard
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
 from src.infrastructure.services.telegram_files import validate_download_path
@@ -35,16 +38,44 @@ class BoundedWriter:
         return self.stream.seek(*args)
 
 
-class TelegramPhotoSource:
+MISSING_STICKER_PREVIEW_TEXT = (
+    'У этого стикера нет превью для сборки. '
+    'Пришлите другой стикер или фото.'
+)
+
+
+class TelegramImageSource:
     def __init__(self, message, gateway):
         self.message, self.gateway = message, gateway
 
-    async def __call__(self, job_id):
-        photo = self.message.photo[-1]
-        if photo.file_size is not None and photo.file_size > config.limits.source_file_bytes:
+    def descriptor(self):
+        sticker = getattr(self.message, 'sticker', None)
+        if sticker is not None:
+            if sticker.is_animated or sticker.is_video:
+                if sticker.thumbnail is None:
+                    raise ValueError(MISSING_STICKER_PREVIEW_TEXT)
+                # Telegram renders the static preview. The bot transfers it;
+                # decoding and generation still belong to the core.
+                return sticker.thumbnail, BINARY_CONTENT_TYPE
+            return sticker, WEBP_CONTENT_TYPE
+        photos = getattr(self.message, 'photo', None)
+        if photos:
+            return photos[-1], JPEG_CONTENT_TYPE
+        raise ValueError('Отправьте фото или стикер.')
+
+    def validate(self):
+        image, content_type = self.descriptor()
+        error = image_aspect_error(getattr(image, 'width', None), getattr(image, 'height', None))
+        if error:
+            raise ValueError(error)
+        if image.file_size is not None and image.file_size > config.limits.source_file_bytes:
             raise ValueError('Размер исходного файла превышает допустимый предел.')
+        return image, content_type
+
+    async def __call__(self, job_id):
+        image, content_type = self.validate()
         self._check_disk()
-        remote = await self.message.bot.get_file(photo.file_id)
+        remote = await self.message.bot.get_file(image.file_id)
         validate_download_path(self.message.bot, remote)
         if remote.file_size is not None and remote.file_size > config.limits.source_file_bytes:
             raise ValueError('Размер исходного файла превышает допустимый предел.')
@@ -56,7 +87,7 @@ class TelegramPhotoSource:
                     remote.file_path, BoundedWriter(stream, config.limits.source_file_bytes),
                     timeout=config.bot.download_timeout_seconds,
                 )
-            return await self.gateway.upload_source(path, job_id)
+            return await self.gateway.upload_source(path, job_id, content_type=content_type)
 
     def _check_disk(self):
         roots = {Path(tempfile.gettempdir())}
@@ -66,20 +97,27 @@ class TelegramPhotoSource:
         required = (config.bot.source_disk_headroom_bytes
                     + config.limits.source_file_bytes * config.bot.max_concurrent_uploads)
         if any(shutil.disk_usage(root).free < required for root in roots):
-            raise ValueError('Недостаточно свободного места для загрузки фото. Попробуйте позже.')
+            raise ValueError('Недостаточно свободного места для загрузки изображения. Попробуйте позже.')
+
+
+# Compatibility for the existing adapter callers; the implementation accepts
+# both supported Telegram media kinds through one admission boundary.
+TelegramPhotoSource = TelegramImageSource
 
 
 async def receive_image(message, state, user, generation_service, generation_progress):
     draft = await state.get_data()
     job_id = generation_job_id(message)
     try:
+        source = TelegramImageSource(message, generation_service.gateway)
+        source.validate()
         receipt = await generation_service.execute(
             actor_id=user.telegram_id, draft=draft, job_id=job_id,
             client_context={
                 'chat_id': message.chat.id, 'reply_to_message_id': message.message_id,
                 'generation_mode': draft.get('generation_mode', 'presets'),
                 'display_name': new_result_filename(getattr(user, 'telegram_username', None)),
-            }, source_loader=TelegramPhotoSource(message, generation_service.gateway),
+            }, source_loader=source,
         )
     except DailyQuotaExceeded as error:
         await message.answer(f'На сегодня доступно {error.limit} изображений. Лимит обновится в полночь ({config.bot.timezone}).')

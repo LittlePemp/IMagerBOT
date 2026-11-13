@@ -168,7 +168,8 @@ async def choose_group(callback, state, uow):
     await state.set_state(S.waiting_for_image_upload)
     await render_view(callback, state,
         f"Размер: {data['image_size']}; шум: {data['noise_level']}; ячейка: {data['inset_size']}.\n"
-        f'Библиотека: {group.display_name}.\nОтправьте изображение как фото.', keyboard([('Назад', 'back')]))
+        f'Библиотека: {group.display_name}.\nОтправьте фото или стикер Telegram.\n'
+        'Для анимированных и видеостикеров используется превью.', keyboard([('Назад', 'back')]))
     await callback.answer()
 
 

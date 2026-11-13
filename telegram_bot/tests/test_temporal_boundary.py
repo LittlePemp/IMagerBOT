@@ -394,6 +394,16 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('задани', self.bot.send_message.await_args.kwargs['text'].lower())
         self.service.acknowledge_completion.assert_awaited_once_with('job-1', 'lease-1', 78)
 
+    async def test_aspect_failure_without_progress_message_sends_human_text_once(self):
+        from src.application.image_errors import IMAGE_TOO_NARROW_TEXT
+        self.job.update(status='failed', result=None, error=(
+            'Invalid image: Image aspect ratio 0.4594 must be between 0.5625 and 1.7778'
+        ))
+        await self.notifier.deliver_once()
+        self.bot.send_document.assert_not_awaited()
+        self.bot.send_message.assert_awaited_once_with(chat_id=12, text=IMAGE_TOO_NARROW_TEXT)
+        self.service.acknowledge_completion.assert_awaited_once_with('job-1', 'lease-1', 78)
+
     async def test_lost_delivery_lease_prevents_sending(self):
         async def lose(job_id, token, lost):
             lost.set()
@@ -420,10 +430,16 @@ class TestNotifier(unittest.IsolatedAsyncioTestCase):
 
 
 class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
+    def photo_message(self):
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock(),
+            photo=[SimpleNamespace(file_id='photo', width=64, height=64, file_size=None)],
+        )
+
     async def test_handler_uses_durable_admission_instead_of_direct_inbox_or_history(self):
         from src.commands.image_generation import upload
         from src.models.admission import AdmissionReceipt
-        message = SimpleNamespace(chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock())
+        message = self.photo_message()
         state = SimpleNamespace(get_data=AsyncMock(return_value={'generation_mode': 'manual'}), clear=AsyncMock())
         receipt = AdmissionReceipt('job-1', 'pending', '2026-11-12', 'hash', actor_id=1)
         service = SimpleNamespace(execute=AsyncMock(return_value=receipt), gateway=object())
@@ -442,7 +458,7 @@ class TestUploadHandler(unittest.IsolatedAsyncioTestCase):
         from src.commands.image_generation import upload
         from src.infrastructure.data.errors import DailyQuotaExceeded
         from datetime import datetime, timezone
-        message = SimpleNamespace(chat=SimpleNamespace(id=12), message_id=34, answer=AsyncMock())
+        message = self.photo_message()
         state = SimpleNamespace(get_data=AsyncMock(return_value={}), clear=AsyncMock())
         service = SimpleNamespace(execute=AsyncMock(side_effect=DailyQuotaExceeded(5, datetime.now(timezone.utc))), gateway=object())
         progress = SimpleNamespace(watch=AsyncMock())

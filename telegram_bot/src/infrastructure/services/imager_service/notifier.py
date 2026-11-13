@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from imager_config.loader import config
+from src.application.image_errors import format_generation_error
 from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 from src.utils.loggers import exception_logger, service_logger
 from src.utils.result_files import delivery_result_filename
@@ -90,7 +91,7 @@ class GenerationNotifier:
                 if accepted_message_id is None:
                     message = await self.bot.send_message(
                         chat_id=chat_id,
-                        text='😔 Не получилось собрать изображение.',
+                        text=format_generation_error(job),
                     )
                     accepted_message_id = message.message_id
             acknowledged = await self.service.acknowledge_completion(

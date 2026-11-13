@@ -2,6 +2,12 @@
 recommended = "Средний"
 
 [[profiles]]
+name = "Максимальный"
+image_size = 128
+noise_level = 30
+inset_size = 40
+
+[[profiles]]
 name = "Большой"
 image_size = 90
 noise_level = 30

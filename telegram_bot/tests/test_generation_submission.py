@@ -280,7 +280,7 @@ class TestBoundedTelegramSource(unittest.IsolatedAsyncioTestCase):
 class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from aiogram import Bot
-        from aiogram.types import Chat, Message, User
+        from aiogram.types import Chat, Message, User, PhotoSize
         from datetime import datetime, timezone
         from test_bot_routes import FakeTelegramSession
         self.session = FakeTelegramSession()
@@ -288,6 +288,7 @@ class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
         self.message = Message(
             message_id=34, date=datetime.now(timezone.utc), chat=Chat(id=1, type='private'),
             from_user=User(id=1, first_name='Alice', username='Alice', is_bot=False),
+            photo=[PhotoSize(file_id='photo', file_unique_id='photo-unique', width=64, height=64)],
         ).as_(self.bot)
         self.state = SimpleNamespace(
             get_data=AsyncMock(return_value={'generation_mode': 'manual'}),

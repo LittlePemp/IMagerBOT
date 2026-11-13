@@ -7,7 +7,9 @@ from pathlib import Path
 
 from imager_config.loader import config
 from imager_contracts import ObjectRef
-from imager_contracts.protocol import JPEG_CONTENT_TYPE, JOB_ID_PATTERN
+from imager_contracts.protocol import (
+    BINARY_CONTENT_TYPE, JPEG_CONTENT_TYPE, PNG_CONTENT_TYPE, WEBP_CONTENT_TYPE, JOB_ID_PATTERN,
+)
 
 
 class BotObjectStorage:
@@ -43,8 +45,10 @@ class BotObjectStorage:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def upload_source(self, path, job_id, *, max_bytes=None):
+    def upload_source(self, path, job_id, *, max_bytes=None, content_type=JPEG_CONTENT_TYPE):
         max_bytes = config.limits.source_file_bytes if max_bytes is None else max_bytes
+        if content_type not in (JPEG_CONTENT_TYPE, PNG_CONTENT_TYPE, WEBP_CONTENT_TYPE, BINARY_CONTENT_TYPE):
+            raise ValueError('Unsupported source image content type')
         size = os.path.getsize(path)
         if not 0 < size <= max_bytes:
             raise ValueError(f'Source file must contain between 1 and {max_bytes} bytes')
@@ -59,12 +63,12 @@ class BotObjectStorage:
                 if getattr(error, 'code', '') not in ('BucketAlreadyExists', 'BucketAlreadyOwnedByYou'):
                     raise
         self.client.fput_object(
-            self.bucket, key, str(path), content_type=JPEG_CONTENT_TYPE,
+            self.bucket, key, str(path), content_type=content_type,
             metadata={'sha256': checksum}, num_parallel_uploads=config.storage.upload_parallelism,
         )
         return {
             'bucket': self.bucket, 'key': key, 'sha256': checksum,
-            'size_bytes': size, 'content_type': JPEG_CONTENT_TYPE,
+            'size_bytes': size, 'content_type': content_type,
         }
 
     def download_result(self, reference, path, *, max_bytes):

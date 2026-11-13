@@ -78,7 +78,10 @@ class AbuseControlMiddleware(BaseMiddleware):
         event = update.message or update.callback_query
         if event is None or event.from_user is None:
             return
-        allowed, notice = self.limiter.check(event.from_user.id, photo=bool(getattr(event, 'photo', None)))
+        allowed, notice = self.limiter.check(
+            event.from_user.id,
+            photo=bool(getattr(event, 'photo', None) or getattr(event, 'sticker', None)),
+        )
         if not allowed:
             if notice:
                 try:

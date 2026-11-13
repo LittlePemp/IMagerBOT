@@ -12,7 +12,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from imager_contracts import JobRequest, make_submission, payload_fingerprint
-from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, SCHEMA_VERSION
+from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, JPEG_CONTENT_TYPE, SCHEMA_VERSION
 from imager_config.loader import config as runtime_config
 from src.infrastructure.services.object_storage import BotObjectStorage
 from src.utils.loggers import service_logger
@@ -97,7 +97,7 @@ class ImagerService:
     async def progress_jobs(self, job_ids):
         return await asyncio.to_thread(lambda: list(self.jobs.find(
             {'_id': {'$in': job_ids}, 'request.client_id': 'telegram'},
-            {'status': 1, 'created_at': 1, 'execution.progress': 1,
+            {'status': 1, 'error': 1, 'created_at': 1, 'execution.progress': 1,
              'completion_outbox.state': 1, 'request.client_context': 1},
         )))
 
@@ -113,9 +113,9 @@ class ImagerService:
              'created_at': {'$gte': start, '$lt': end}},
         )
 
-    async def upload_source(self, path, job_id):
+    async def upload_source(self, path, job_id, *, content_type=JPEG_CONTENT_TYPE):
         try:
-            return await asyncio.to_thread(self.object_store.upload_source, path, job_id)
+            return await asyncio.to_thread(self.object_store.upload_source, path, job_id, content_type=content_type)
         except Exception:
             service_logger.exception(f'Source upload failed: job_id={job_id}')
             raise

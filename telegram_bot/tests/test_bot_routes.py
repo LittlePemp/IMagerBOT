@@ -201,7 +201,8 @@ class BotRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((data['image_size'], data['noise_level'], data['inset_size'], data['image_group']),
                          (64, 30, 40, 'icons'))
         self.assertEqual(set(data['selected_presets']), {'image_size', 'noise_level', 'inset_size'})
-        self.assertIn('Отправьте изображение', self.session.last[3].text)
+        self.assertIn('Отправьте фото или стикер', self.session.last[3].text)
+        self.assertIn('Для анимированных и видеостикеров используется превью', self.session.last[3].text)
         await self.click(3, title='Назад')
         self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_group.state)
         await self.click(3, title='Иконки')

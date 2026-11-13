@@ -33,14 +33,15 @@ class PresetSeedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([
             (profile['name'], *(profile['parameters'][kind.value]['value'] for kind in PROFILE_TYPES))
             for profile in profiles
-        ], [('Большой', 90, 30, 40), ('Средний', 64, 30, 40), ('Маленький', 32, 30, 32)])
+        ], [('Максимальный', 128, 30, 40), ('Большой', 90, 30, 40),
+            ('Средний', 64, 30, 40), ('Маленький', 32, 30, 32)])
         collection = PresetCollection()
         collection.rows[('image_size', 'Свой')] = {'type': 'image_size', 'name': 'Свой', 'value': 42}
-        self.assertEqual(await seed_generation_presets(collection), 3)
+        self.assertEqual(await seed_generation_presets(collection), 4)
         initial = copy.deepcopy(collection.rows)
-        self.assertEqual(await seed_generation_presets(collection), 3)
+        self.assertEqual(await seed_generation_presets(collection), 4)
         self.assertEqual(collection.rows, initial)
-        self.assertEqual(len(collection.rows), 10)
+        self.assertEqual(len(collection.rows), 13)
 
 
 class GenerationPresetWizardTests(TelegramFixture):
@@ -69,10 +70,10 @@ class GenerationPresetWizardTests(TelegramFixture):
     async def test_one_profile_click_sets_all_parameters_and_goes_directly_to_libraries(self):
         await wizard.choose_mode(self.callback('mode:presets'), self.state, self.uow)
         labels = [button.text for row in self.last_view().reply_markup.inline_keyboard for button in row]
-        self.assertEqual(labels[:3], [
-            'Большой', 'Средний', 'Маленький',
+        self.assertEqual(labels[:4], [
+            'Максимальный', 'Большой', 'Средний', 'Маленький',
         ])
-        await wizard.pick_preset(self.callback('pick:1'), self.state, self.uow)
+        await wizard.pick_preset(self.callback('pick:2'), self.state, self.uow)
         data = await self.state.get_data()
         self.assertEqual(tuple(data[field] for field in ('image_size', 'noise_level', 'inset_size')), (64, 30, 40))
         self.assertEqual(set(data['selected_presets']), {kind.value for kind in PROFILE_TYPES})
@@ -81,11 +82,11 @@ class GenerationPresetWizardTests(TelegramFixture):
 
     async def test_incomplete_profiles_are_hidden_and_changed_values_require_a_fresh_choice(self):
         self.rows.append(CommonParam(name='Неполный', type=ParamType.IMAGE_SIZE, value=72))
-        self.assertEqual(len(await list_generation_profiles(self.parameters)), 3)
+        self.assertEqual(len(await list_generation_profiles(self.parameters)), 4)
         await wizard.choose_mode(self.callback('mode:presets'), self.state, self.uow)
         self.rows = [row.model_copy(update={'value': 31})
                      if row.name == 'Средний' and row.type == ParamType.NOISE_LEVEL else row for row in self.rows]
-        await wizard.pick_preset(self.callback('pick:1'), self.state, self.uow)
+        await wizard.pick_preset(self.callback('pick:2'), self.state, self.uow)
         self.uow.image_group_repository.get_groups.assert_not_awaited()
         self.assertEqual((await self.state.get_data())['selected_presets'], {})
         self.assertTrue(any(isinstance(request, AnswerCallbackQuery) and request.text == 'Пресет изменён. Обновите выбор.'

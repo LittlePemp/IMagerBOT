@@ -19,6 +19,7 @@ OBJECT_KEY_MAX_LENGTH = 1024
 CONTENT_TYPE_MAX_LENGTH = 128
 JPEG_CONTENT_TYPE = 'image/jpeg'
 PNG_CONTENT_TYPE = 'image/png'
+WEBP_CONTENT_TYPE = 'image/webp'
 JSON_CONTENT_TYPE = 'application/json'
 BINARY_CONTENT_TYPE = 'application/octet-stream'
 JPEG_EXTENSIONS = ('.jpg', '.jpeg')
