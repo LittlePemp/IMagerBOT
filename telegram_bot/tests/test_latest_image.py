@@ -29,7 +29,7 @@ class LatestImageRepositoryTests(unittest.IsolatedAsyncioTestCase):
         collection = Mock()
 
         async def find_one(query, projection, *, sort):
-            self.assertEqual(sort, [('date', -1)])
+            self.assertEqual(sort, [('date', -1), ('last_admitted_at', -1), ('created_at', -1)])
             self.assertEqual(query.get('admissions.0'), {'$exists': True})
             self.assertEqual(projection.get('admissions'), {'$slice': -1})
             matching = [bucket for bucket in buckets if bucket['actor_id'] == query['actor_id'] and bucket['admissions']]

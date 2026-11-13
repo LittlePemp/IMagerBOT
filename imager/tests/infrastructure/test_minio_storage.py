@@ -67,6 +67,9 @@ class FakeMinio:
         self.responses.append(response)
         return response
 
+    def remove_object(self, bucket, key):
+        self.objects.pop((bucket, key), None)
+
 
 class Groups:
     def __init__(self):
@@ -88,6 +91,26 @@ class TestMinioStorage(unittest.TestCase):
         path = self.root / name
         path.write_bytes(data)
         return path
+
+    def test_retention_delete_verifies_reference_and_is_idempotent(self):
+        reference = self.store.upload_file(self.write(), 'uploads/job/source.bin')
+        self.store.delete_file(reference)
+        self.store.delete_file(reference)
+        self.assertNotIn(('imager', reference['key']), self.client.objects)
+
+    def test_retention_delete_refuses_replaced_object(self):
+        reference = self.store.upload_file(self.write(), 'uploads/job/source.bin')
+        self.client.objects['imager', reference['key']] = (b'replaced', {'x-amz-meta-sha256': 'a' * 64})
+        with self.assertRaises(ObjectIntegrityError):
+            self.store.delete_file(reference)
+        self.assertIn(('imager', reference['key']), self.client.objects)
+
+    def test_retention_delete_propagates_transport_failure(self):
+        reference = self.store.upload_file(self.write(), 'uploads/job/source.bin')
+        with patch.object(self.client, 'remove_object', side_effect=OSError('temporary network failure')):
+            with self.assertRaises(ObjectStoreError):
+                self.store.delete_file(reference)
+        self.assertIn(('imager', reference['key']), self.client.objects)
 
     def test_roundtrip_stream_is_closed_and_released(self):
         reference = self.store.upload_file(self.write(), 'uploads/job/source.bin')

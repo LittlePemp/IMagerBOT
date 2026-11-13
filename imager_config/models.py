@@ -96,6 +96,17 @@ class RuntimeCatalogConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeRetentionConfig:
+    enabled: bool
+    source_count: int
+    result_count: int
+    poll_seconds: float
+    batch_size: int
+    scan_size: int
+    lease_seconds: int
+
+
+@dataclass(frozen=True)
 class RuntimeMongoConfig:
     connect_timeout_ms: int
     socket_timeout_ms: int
@@ -381,6 +392,7 @@ class RuntimeConfig:
     image: RuntimeImageConfig
     storage: RuntimeStorageConfig
     catalog: RuntimeCatalogConfig
+    retention: RuntimeRetentionConfig
     mongo: RuntimeMongoConfig
     jobs: RuntimeJobsConfig
     temporal: RuntimeTemporalConfig

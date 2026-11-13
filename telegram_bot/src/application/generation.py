@@ -51,6 +51,7 @@ class SubmitGeneration:
                 item.name == selected['name'] and item.value == selected['value'] for item in available.value
             ):
                 raise ValueError('Выбранный пресет изменён или удалён. Выберите параметры заново.')
+        return actor_id in self.fixed_admin_ids or bool(actor.is_admin)
 
     async def _seed_day(self, actor_id, now):
         if not await self.admissions.day_exists(actor_id, now=now):
@@ -81,10 +82,10 @@ class SubmitGeneration:
                 payload_hash=legacy['payload_hash'], duplicate=True,
                 actor_id=actor_id,
             )
-        await self._policy(actor_id, draft)
+        quota_exempt = await self._policy(actor_id, draft)
         now = datetime.now(timezone.utc)
         await self._seed_day(actor_id, now)
-        if not await self.admissions.remaining(actor_id, now=now):
+        if not quota_exempt and not await self.admissions.remaining(actor_id, now=now):
             raise DailyQuotaExceeded(config.bot.regular_user_upload_limit, self.admissions.day_window(now)[1])
         await self._capacity()
         async with self.gate.acquire(actor_id):
@@ -106,9 +107,11 @@ class SubmitGeneration:
                     if receipt.actor_id != actor_id:
                         raise AccessDenied('Это изображение недоступно.')
                     return receipt
-                await self._policy(actor_id, draft)
+                quota_exempt = await self._policy(actor_id, draft)
                 await self._capacity()
                 now = datetime.now(timezone.utc)
                 await self._seed_day(actor_id, now)
                 document['created_at'] = document['updated_at'] = now
-                return await self.admissions.accept_submission(document, actor_id=actor_id, now=now)
+                return await self.admissions.accept_submission(
+                    document, actor_id=actor_id, now=now, quota_exempt=quota_exempt,
+                )

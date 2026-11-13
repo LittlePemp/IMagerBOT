@@ -13,6 +13,16 @@ from imager_config.loader import CONFIG_OVERRIDE_VARIABLE, ConfigurationError, c
 
 
 class TestRuntimeConfig(unittest.TestCase):
+    def test_retention_is_global_bounded_and_validated(self):
+        self.assertEqual((config.retention.source_count, config.retention.result_count), (10, 10))
+        for content in (
+            '[retention]\nsource_count=0', '[retention]\nresult_count=-1',
+            '[retention]\nscan_size=9', '[retention]\nbatch_size=257',
+            '[retention]\nlease_seconds=0',
+        ):
+            with self.subTest(content=content):
+                self.reject(content)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='imager-config-test-')
         self.addCleanup(temporary.cleanup)

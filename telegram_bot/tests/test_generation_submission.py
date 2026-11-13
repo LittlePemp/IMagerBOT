@@ -22,7 +22,7 @@ class TestGenerationSubmission(unittest.IsolatedAsyncioTestCase):
         self.admissions = AdmissionRepository(
             self.collection, timezone=config.bot.timezone, daily_limit=5, lease_seconds=60, retry_seconds=3,
         )
-        self.actor = SimpleNamespace(isbanned=False, is_admin=True)
+        self.actor = SimpleNamespace(isbanned=False, is_admin=False)
         self.group = SimpleNamespace(active=True)
         self.repositories = SimpleNamespace(
             admission_repository=self.admissions,
@@ -74,12 +74,70 @@ class TestGenerationSubmission(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AccessDenied):
             await self.execute(actor_id=2)
 
-    async def test_existing_today_jobs_seed_quota_including_administrators(self):
+    async def test_existing_today_jobs_seed_regular_user_quota(self):
         self.gateway.count_user_jobs_between.return_value = 5
         with self.assertRaises(DailyQuotaExceeded):
             await self.execute()
         self.loader.assert_not_awaited()
         self.assertEqual(await self.admissions.remaining(1), 0)
+
+    async def test_database_administrator_can_accept_more_than_five_images(self):
+        self.actor.is_admin = True
+        self.gateway.count_user_jobs_between.return_value = 5
+        for index in range(8):
+            await self.execute(f'admin-{index}')
+        self.assertEqual(self.loader.await_count, 8)
+        exempt = [row for row in self.collection.documents.values() if row.get('quota_exempt')]
+        self.assertEqual(len(exempt), 8)
+        self.assertTrue(all(len(row['admissions']) == 1 for row in exempt))
+
+    async def test_permanent_admin_is_unlimited_even_if_database_role_was_changed(self):
+        self.actor.isbanned = True
+        self.service.fixed_admin_ids = frozenset({1})
+        self.gateway.count_user_jobs_between.return_value = 5
+        await self.execute('permanent-admin')
+        self.loader.assert_awaited_once()
+        self.assertTrue(any(row.get('quota_exempt') for row in self.collection.documents.values()))
+
+    async def test_revoked_admin_reverts_to_ordinary_quota_including_prior_acceptances(self):
+        self.actor.is_admin = True
+        for index in range(5):
+            await self.execute(f'admin-{index}')
+        self.actor.is_admin = False
+        with self.assertRaises(DailyQuotaExceeded):
+            await self.execute('after-demotion')
+        self.assertEqual(self.loader.await_count, 5)
+
+    async def test_admin_role_is_rechecked_after_transfer_before_acceptance(self):
+        self.actor.is_admin = True
+        self.gateway.count_user_jobs_between.return_value = 5
+
+        async def load(job_id):
+            self.actor.is_admin = False
+            return submission(job_id)['request']['source']
+
+        self.loader.side_effect = load
+        with self.assertRaises(DailyQuotaExceeded):
+            await self.execute()
+        self.assertFalse(any(row.get('quota_exempt') for row in self.collection.documents.values()))
+
+    async def test_untrusted_draft_cannot_enable_administrator_quota_exemption(self):
+        self.gateway.count_user_jobs_between.return_value = 5
+        self.draft.update(is_admin=True, quota_exempt=True)
+        with self.assertRaises(DailyQuotaExceeded):
+            await self.execute()
+        self.loader.assert_not_awaited()
+
+    async def test_administrator_still_obeys_queue_and_ban_policy(self):
+        self.actor.is_admin = True
+        self.gateway.count_active_jobs.return_value = config.bot.max_pending_jobs
+        with self.assertRaisesRegex(ValueError, 'Очередь заполнена'):
+            await self.execute()
+        self.loader.assert_not_awaited()
+        self.gateway.count_active_jobs.return_value = 0
+        self.actor.isbanned = True
+        with self.assertRaises(AccessDenied):
+            await self.execute()
 
     async def test_only_first_admission_initializes_legacy_count(self):
         await self.execute('job-1')

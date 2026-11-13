@@ -1,7 +1,8 @@
 """Daily quota + frozen submission outbox in one atomic Mongo document.
 
-Every account, including administrators, has the same configured daily limit.
-The unique multikey index prevents the same Telegram job entering another day.
+Regular accounts use bounded daily buckets. Administrators get one bounded
+document per image, with no daily limit. The unique multikey index prevents
+the same Telegram image entering another bucket or another day.
 """
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone as utc_timezone
@@ -34,7 +35,10 @@ class AdmissionRepository:
             partialFilterExpression={'admissions.job_id': {'$exists': True}},
         )
         await self.collection.create_index([('admissions.state', 1), ('admissions.next_attempt_at', 1)])
-        await self.collection.create_index([('actor_id', 1), ('date', -1)])
+        await self.collection.create_index([
+            ('actor_id', 1), ('date', -1), ('last_admitted_at', -1), ('created_at', -1),
+        ])
+        await self.collection.create_index([('actor_id', 1), ('date', 1), ('quota_exempt', 1)])
 
     @staticmethod
     def _now(now):
@@ -71,16 +75,24 @@ class AdmissionRepository:
         bucket = await self.collection.find_one(
             {'actor_id': actor_id, 'admissions.0': {'$exists': True}},
             {'actor_id': 1, 'date': 1, 'admissions': {'$slice': -1}},
-            sort=[('date', -1)],
+            sort=[('date', -1), ('last_admitted_at', -1), ('created_at', -1)],
         )
         if not bucket or bucket.get('actor_id') != actor_id or not bucket.get('admissions'):
             return None
         return self._receipt(bucket, bucket['admissions'][-1], duplicate=True)
 
     async def remaining(self, actor_id, now=None):
-        bucket_id, _, _ = self._day(actor_id, self._now(now))
+        bucket_id, day, _ = self._day(actor_id, self._now(now))
         document = await self.collection.find_one({'_id': bucket_id}, {'used': 1})
-        return max(0, self.daily_limit - (document['used'] if document else 0))
+        exempt_used = await self._exempt_count(actor_id, day)
+        return max(0, self.daily_limit - exempt_used - (document['used'] if document else 0))
+
+    async def _exempt_count(self, actor_id, day):
+        # Kept separately so revoking an administrator does not reset the
+        # ordinary account's usage or lose accepted-but-not-published images.
+        return await self.collection.count_documents({
+            'actor_id': actor_id, 'date': day, 'quota_exempt': True,
+        })
 
     def day_window(self, now=None):
         local = self._now(now).astimezone(self.timezone)
@@ -126,7 +138,9 @@ class AdmissionRepository:
             raise AdmissionConflict('Это сообщение уже принято с другими параметрами.')
         return AdmissionRepository._receipt(bucket, entry, duplicate=True)
 
-    async def accept_submission(self, document, *, actor_id, now=None):
+    async def accept_submission(self, document, *, actor_id, now=None, quota_exempt=False):
+        if type(quota_exempt) is not bool:
+            raise ValueError('Quota exemption must be a resolved boolean policy')
         self._validate_document(document, actor_id)
         found = await self._find_entry(document['_id'])
         if found:
@@ -141,12 +155,30 @@ class AdmissionRepository:
         }
         try:
             await self.ensure_day(actor_id, now=moment)
-            bucket = await self.collection.find_one_and_update(
-                {'_id': bucket_id, 'used': {'$lt': self.daily_limit},
-                 'admissions.job_id': {'$ne': document['_id']}},
-                {'$inc': {'used': 1}, '$push': {'admissions': entry}},
-                return_document=ReturnDocument.AFTER,
-            )
+            if quota_exempt:
+                # Never grow an administrator's daily array indefinitely.
+                # The request's immutable identity is also this bucket's key.
+                bucket_id = f'{actor_id}:admin:{document["_id"]}'
+                bucket = {
+                    '_id': bucket_id, 'actor_id': actor_id, 'date': day,
+                    'quota_exempt': True, 'used': 1, 'admissions': [entry],
+                    'created_at': moment, 'last_admitted_at': moment,
+                }
+                previous = await self.collection.find_one_and_update(
+                    {'_id': bucket_id}, {'$setOnInsert': bucket},
+                    upsert=True, return_document=ReturnDocument.BEFORE,
+                )
+                if previous is not None:
+                    return self._matching_receipt((previous, previous['admissions'][0]), document)
+            else:
+                ordinary_limit = max(0, self.daily_limit - await self._exempt_count(actor_id, day))
+                bucket = await self.collection.find_one_and_update(
+                    {'_id': bucket_id, 'used': {'$lt': ordinary_limit},
+                     'admissions.job_id': {'$ne': document['_id']}},
+                    {'$inc': {'used': 1}, '$push': {'admissions': entry},
+                     '$set': {'last_admitted_at': moment}},
+                    return_document=ReturnDocument.AFTER,
+                )
             if bucket:
                 return self._receipt(bucket, entry, duplicate=False)
         except DuplicateKeyError:

@@ -70,7 +70,7 @@ class GenerationPresetWizardTests(TelegramFixture):
         await wizard.choose_mode(self.callback('mode:presets'), self.state, self.uow)
         labels = [button.text for row in self.last_view().reply_markup.inline_keyboard for button in row]
         self.assertEqual(labels[:3], [
-            'Большой: 90 / 30 / 40', 'Средний: 64 / 30 / 40', 'Маленький: 32 / 30 / 32',
+            'Большой', 'Средний', 'Маленький',
         ])
         await wizard.pick_preset(self.callback('pick:1'), self.state, self.uow)
         data = await self.state.get_data()

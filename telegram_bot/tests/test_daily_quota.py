@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from pymongo.errors import DuplicateKeyError, NetworkTimeout
+from pymongo import ReturnDocument
 
 from imager_contracts import make_submission
 from src.application.admission import AdmissionDispatcher
@@ -41,6 +42,10 @@ def matches(document, query):
             elif condition not in values:
                 return False
             continue
+        if key == 'admissions.0':
+            if bool(document.get('admissions')) != condition['$exists']:
+                return False
+            continue
         value = document.get(key)
         if isinstance(condition, dict):
             if '$elemMatch' in condition and not any(matches(item, condition['$elemMatch']) for item in value):
@@ -69,9 +74,17 @@ class AtomicCollection:
     async def create_index(self, *args, **kwargs):
         self.indexes.append((args, kwargs))
 
-    async def find_one(self, query, projection=None):
+    async def find_one(self, query, projection=None, sort=None):
         async with self.lock:
-            return copy.deepcopy(next((doc for doc in self.documents.values() if matches(doc, query)), None))
+            values = [doc for doc in self.documents.values() if matches(doc, query)]
+            for field, direction in reversed(sort or []):
+                values.sort(key=lambda doc: (doc.get(field) is not None, doc.get(field)),
+                            reverse=direction < 0)
+            return copy.deepcopy(values[0] if values else None)
+
+    async def count_documents(self, query):
+        async with self.lock:
+            return sum(matches(doc, query) for doc in self.documents.values())
 
     def _apply(self, document, query, update):
         entry = None
@@ -103,18 +116,24 @@ class AtomicCollection:
                 self._apply(document, query, update)
             return SimpleNamespace(matched_count=int(document is not None))
 
-    async def find_one_and_update(self, query, update, **kwargs):
+    async def find_one_and_update(self, query, update, *, upsert=False,
+                                  return_document=ReturnDocument.AFTER, **kwargs):
         async with self.lock:
             original = next((doc for doc in self.documents.values() if matches(doc, query)), None)
-            if original is None:
+            if original is None and not upsert:
                 return None
-            candidate = copy.deepcopy(original)
+            candidate = copy.deepcopy(original if original is not None else update['$setOnInsert'])
+            if original is None:
+                for entry in candidate.get('admissions', []):
+                    if any(current['job_id'] == entry['job_id']
+                           for bucket in self.documents.values() for current in bucket['admissions']):
+                        raise DuplicateKeyError('job identity')
             self._apply(candidate, query, update)
             self.documents[candidate['_id']] = candidate
             if self.fail_after_write:
                 self.fail_after_write = False
                 raise NetworkTimeout('ack lost after commit')
-            return copy.deepcopy(candidate)
+            return copy.deepcopy(candidate if return_document == ReturnDocument.AFTER else original)
 
     async def aggregate(self, pipeline):
         if any('$unwind' in stage for stage in pipeline):
@@ -153,6 +172,72 @@ class TestDailyQuota(unittest.IsolatedAsyncioTestCase):
             self.collection, timezone='Europe/Moscow', daily_limit=5, lease_seconds=60, retry_seconds=3,
         )
         self.now = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
+
+    async def test_unlimited_administrators_use_one_bounded_bucket_per_image(self):
+        receipts = await asyncio.gather(*[
+            self.repository.accept_submission(submission(f'admin-{index}'), actor_id=1,
+                                              now=self.now, quota_exempt=True)
+            for index in range(20)
+        ])
+        self.assertTrue(all(not receipt.duplicate for receipt in receipts))
+        self.assertEqual(await self.repository.pending_count(), 20)
+        exempt = [row for row in self.collection.documents.values() if row.get('quota_exempt')]
+        self.assertEqual(len(exempt), 20)
+        self.assertTrue(all(len(row['admissions']) == 1 and row['used'] == 1 for row in exempt))
+        normal = self.collection.documents['1:2026-11-12']
+        self.assertEqual((normal['used'], normal['admissions']), (0, []))
+        # This value is the ordinary quota after a possible role revocation.
+        self.assertEqual(await self.repository.remaining(1, self.now), 0)
+
+    async def test_concurrent_duplicate_administrator_photo_has_one_receipt(self):
+        receipts = await asyncio.gather(*[
+            self.repository.accept_submission(submission('same-admin'), actor_id=1,
+                                              now=self.now, quota_exempt=True)
+            for _ in range(4)
+        ])
+        self.assertEqual(sum(not receipt.duplicate for receipt in receipts), 1)
+        self.assertEqual(sum(len(row['admissions']) for row in self.collection.documents.values()), 1)
+
+    async def test_demotion_and_promotion_keep_existing_daily_usage(self):
+        await self.repository.ensure_day(1, initial_used=1, now=self.now)
+        for index in range(2):
+            await self.repository.accept_submission(submission(f'admin-{index}'), actor_id=1,
+                                                    now=self.now, quota_exempt=True)
+        self.assertEqual(await self.repository.remaining(1, self.now), 2)
+        for index in range(2):
+            await self.repository.accept_submission(submission(f'regular-{index}'), actor_id=1, now=self.now)
+        with self.assertRaises(DailyQuotaExceeded):
+            await self.repository.accept_submission(submission('sixth'), actor_id=1, now=self.now)
+        promoted = await self.repository.accept_submission(submission('promoted'), actor_id=1,
+                                                          now=self.now, quota_exempt=True)
+        self.assertFalse(promoted.duplicate)
+        self.assertEqual(await self.repository.remaining(1, self.now), 0)
+
+    async def test_admin_lost_ack_reconciles_without_second_document(self):
+        await self.repository.ensure_day(1, now=self.now)
+        self.collection.fail_after_write = True
+        receipt = await self.repository.accept_submission(submission('admin'), actor_id=1,
+                                                          now=self.now, quota_exempt=True)
+        self.assertTrue(receipt.duplicate)
+        self.assertEqual(await self.repository.pending_count(), 1)
+
+    async def test_admin_receipt_replay_on_next_day_does_not_create_another_bucket(self):
+        first = await self.repository.accept_submission(submission('admin'), actor_id=1,
+                                                        now=self.now, quota_exempt=True)
+        replay = await self.repository.accept_submission(submission('admin'), actor_id=1,
+                                                         now=self.now + timedelta(days=1), quota_exempt=True)
+        self.assertTrue(replay.duplicate)
+        self.assertEqual(replay.date, first.date)
+        self.assertEqual(sum(bool(row.get('quota_exempt')) for row in self.collection.documents.values()), 1)
+
+    async def test_latest_receipt_follows_acceptance_time_across_admin_and_regular_buckets(self):
+        await self.repository.accept_submission(submission('first'), actor_id=1, now=self.now)
+        await self.repository.accept_submission(submission('admin'), actor_id=1,
+                                                now=self.now + timedelta(minutes=1), quota_exempt=True)
+        self.assertEqual((await self.repository.latest(1)).job_id, 'admin')
+        await self.repository.accept_submission(submission('latest'), actor_id=1,
+                                                now=self.now + timedelta(minutes=2))
+        self.assertEqual((await self.repository.latest(1)).job_id, 'latest')
 
     async def test_one_remaining_slot_allows_exactly_one_concurrent_distinct_photo(self):
         for index in range(4):

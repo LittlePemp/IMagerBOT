@@ -31,7 +31,7 @@ async def start(event, state):
     await state.clear()
     await state.set_state(S.choosing_generation_mode)
     await render_view(event, state, 'Выберите способ ввода параметров:', keyboard([
-        ('Из пресетов', 'mode:presets'), ('Вручную', 'mode:manual'),
+        ('Из пресетов (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
     ]))
 
 
@@ -50,8 +50,7 @@ async def show_presets(event, state, uow, step, page=0):
     values = await list_generation_profiles(uow.image_build_params_repository)
     page = max(0, min(page, max(0, (len(values) - 1) // config.bot.ui_page_size)))
     start_index = page * config.bot.ui_page_size
-    buttons = [(f"{item['name']}: " + ' / '.join(str(item['parameters'][kind.value]['value'])
-                                               for kind, *_ in STEPS), f'pick:{index}')
+    buttons = [(item['name'], f'pick:{index}')
                for index, item in enumerate(values) if start_index <= index < start_index + config.bot.ui_page_size]
     if page:
         buttons.append(('← Предыдущая', f'preset_page:0:{page - 1}'))
@@ -64,7 +63,7 @@ async def show_presets(event, state, uow, step, page=0):
     })
     await state.set_state(S.selecting_image_size)
     await render_view(event, state,
-        'Выберите пресет (размер / шум / ширина ячейки):' if values else 'Пока нет доступных пресетов.',
+        'Выберите пресет:' if values else 'Пока нет доступных пресетов.',
         keyboard(buttons))
 
 

@@ -161,7 +161,7 @@ services:
       temporal-web:
         condition: service_started
     ports:
-      - 127.0.0.1:${TEMPORAL_UI_PORT:?Run infra/setup.py}:8080
+      - 0.0.0.0:${TEMPORAL_UI_PORT:?Run infra/setup.py}:8080
     volumes:
       - ./nginx/temporal-ui.prod.conf:/etc/nginx/conf.d/default.conf:ro
     secrets:

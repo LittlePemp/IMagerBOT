@@ -140,6 +140,10 @@ def _validate(config):
                     raise ConfigurationError(f'{name} must be nonempty text without control characters')
 
     numbers(config)
+    if config.retention.scan_size < max(
+        config.retention.source_count, config.retention.result_count, config.retention.batch_size,
+    ):
+        raise ConfigurationError('Retention scan must cover retained counts and the cleanup batch')
     limits, image = config.limits, config.image
     # The one-gigabyte ceiling is a core invariant; configuration can lower it.
     if limits.memory_bytes > WORKER_MEMORY_CEILING_BYTES:

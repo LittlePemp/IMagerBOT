@@ -79,6 +79,16 @@ max_images = 100000
 validation_interval = 128
 allowed_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]
 
+# Global generation artifacts only; catalog packs and import ZIPs are retained.
+[retention]
+enabled = true
+source_count = 10
+result_count = 10
+poll_seconds = 30.0
+batch_size = 64
+scan_size = 256
+lease_seconds = 120
+
 [mongo]
 connect_timeout_ms = 5000
 socket_timeout_ms = 10000

@@ -18,11 +18,12 @@ from src.utils.result_files import delivery_result_filename
 
 
 class GenerationNotifier:
-    def __init__(self, service, bot, history_repository, *, progress=None):
+    def __init__(self, service, bot, history_repository, *, progress=None, on_result_delivered=None):
         self.service = service
         self.bot = bot
         self.history_repository = history_repository
         self.progress = progress
+        self.on_result_delivered = on_result_delivered
         self._telegram_resume_at = 0.0
 
     async def _renew(self, job_id, token, lost):
@@ -123,6 +124,15 @@ class GenerationNotifier:
             renewal.cancel()
             with suppress(asyncio.CancelledError):
                 await renewal
+        if (job['status'] == 'completed' and accepted_message_id is not None
+                and self.on_result_delivered is not None):
+            try:
+                await self.on_result_delivered(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Menu delivery never changes the already sent result outbox.
+                exception_logger.exception(f'Cannot show menu after image delivery: job_id={job_id}')
         return True
 
     async def repair_history_once(self):

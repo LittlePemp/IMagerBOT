@@ -190,6 +190,30 @@ class MinioObjectStore:
             with open(path, encoding='utf-8') as stream:
                 return json.load(stream)
 
+    def delete_file(self, reference):
+        """Delete one immutable, verified object; absence is idempotent success.
+
+        Callers own lifecycle/namespace checks. Never enumerate or remove a
+        prefix here: catalog and import assets share this bucket.
+        """
+        original = reference_dict(reference)
+        ref = self.validate_reference(original, original.get('size_bytes', 0))
+        try:
+            existing = self.client.stat_object(ref['bucket'], ref['key'])
+        except Exception as error:
+            if getattr(error, 'code', None) in ('NoSuchKey', 'NoSuchObject', 'NotFound'):
+                return
+            raise ObjectStoreError(error) from error
+        metadata = {str(key).lower(): str(value) for key, value in existing.metadata.items()}
+        if (existing.size != ref['size_bytes']
+                or metadata.get('x-amz-meta-sha256') != ref['sha256']):
+            raise ObjectIntegrityError('Refusing to remove an object that differs from its immutable reference')
+        try:
+            self.client.remove_object(ref['bucket'], ref['key'])
+        except Exception as error:
+            if getattr(error, 'code', None) not in ('NoSuchKey', 'NoSuchObject', 'NotFound'):
+                raise ObjectStoreError(error) from error
+
     def put_json(self, value, key):
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=False).encode('utf-8')

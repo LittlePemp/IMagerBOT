@@ -8,7 +8,8 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from imager_config.loader import config
 from settings import settings
-from src.infrastructure.runtime_bootstrap import create_job_repository
+from src.infrastructure.runtime_bootstrap import create_job_repository, create_object_store
+from src.infrastructure.jobs.image_retention import ImageRetention
 from src.infrastructure.catalog_import.bootstrap import create_import_repository
 from src.infrastructure.temporal_client import connect_temporal_client
 from src.shared_kernel.loggers import presentation_logger
@@ -149,16 +150,7 @@ async def reconcile_import_once(repository, client):
             presentation_logger.exception(f'Cannot reconcile import: import_id={job["import_id"]}')
 
 
-async def main():
-    repository = create_job_repository()
-    import_repository = create_import_repository()
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(signum, stop.set)
-        except (NotImplementedError, RuntimeError):
-            pass
+async def run_dispatchers(repository, import_repository, stop):
     while not stop.is_set():
         try:
             client = await connect_temporal_client(settings)
@@ -185,6 +177,40 @@ async def main():
                 await asyncio.wait_for(stop.wait(), timeout=config.temporal.dispatcher.reconnect_seconds)
             except asyncio.TimeoutError:
                 pass
+
+
+async def retain_images(repository, stop):
+    if not config.retention.enabled:
+        return
+    while not stop.is_set():
+        try:
+            store = await asyncio.to_thread(create_object_store)
+            cleaner = ImageRetention(repository.collection, store)
+            await asyncio.to_thread(cleaner.initialize_indexes)
+            await cleaner.run(stop)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            presentation_logger.exception('Cannot initialize generation artifact retention')
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=config.retention.poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+
+async def main():
+    repository = create_job_repository()
+    import_repository = create_import_repository()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signum, stop.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(retain_images(repository, stop), name='generation-artifact-retention')
+        await run_dispatchers(repository, import_repository, stop)
 
 
 if __name__ == '__main__':

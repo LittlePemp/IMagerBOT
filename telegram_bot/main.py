@@ -22,6 +22,7 @@ from settings import settings
 from src.application.admission import AdmissionDispatcher
 from src.application.generation import SubmitGeneration
 from src.application.generation_progress import GenerationProgress
+from src.application.generation_result_menu import GenerationResultMenu
 from src.application.catalog_projection import CatalogImportProjection
 from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import register_handlers_admin_panel
@@ -132,7 +133,14 @@ async def main():
         ), progress=progress)
         imports = dispatcher['catalog_import_service']
         await imports.ensure_indexes()
-        notifier = GenerationNotifier(imager_service, bot, repositories.generation_history_repository, progress=progress)
+        result_menu = GenerationResultMenu(
+            dispatcher, repositories.user_repository, bot,
+            fixed_admin_ids=settings.telegram_admin_ids,
+        )
+        notifier = GenerationNotifier(
+            imager_service, bot, repositories.generation_history_repository,
+            progress=progress, on_result_delivered=result_menu,
+        )
         admission = AdmissionDispatcher(repositories.admission_repository, imager_service, publication_lock=gate.admission_lock)
         projection = CatalogImportProjection(imports, repositories.image_group_repository)
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),

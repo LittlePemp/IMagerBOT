@@ -49,13 +49,7 @@ async def require_current(callback, state, token):
     return valid
 
 
-async def render_view(event, state, text, reply_markup, *, edit=None, owner_id=None):
-    """Store actions on the server; callbacks contain only a nonce and an index."""
-    callback = getattr(event, 'message', None) is not None
-    message = event.message if callback else event
-    if edit is None:
-        edit = callback
-    owner_id = event.from_user.id if owner_id is None else owner_id
+def _view_keyboard(reply_markup):
     token, actions, rows = new_view_token(), {}, []
     for row in reply_markup.inline_keyboard:
         buttons = []
@@ -69,7 +63,25 @@ async def render_view(event, state, text, reply_markup, *, edit=None, owner_id=N
                 'callback_data': NavigationCallback(view=token, item=item).pack(),
             }))
         rows.append(buttons)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    return token, actions, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_view(bot, state, chat_id, text, reply_markup, *, owner_id):
+    """Send a background view with the same owner/message-bound navigation."""
+    token, actions, keyboard = _view_keyboard(reply_markup)
+    sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+    await bind_view(state, sent, owner_id=owner_id, token=token, records=actions)
+    return sent
+
+
+async def render_view(event, state, text, reply_markup, *, edit=None, owner_id=None):
+    """Store actions on the server; callbacks contain only a nonce and an index."""
+    callback = getattr(event, 'message', None) is not None
+    message = event.message if callback else event
+    if edit is None:
+        edit = callback
+    owner_id = event.from_user.id if owner_id is None else owner_id
+    token, actions, keyboard = _view_keyboard(reply_markup)
     sent = await (message.edit_text(text, reply_markup=keyboard) if edit
                   else message.answer(text, reply_markup=keyboard))
     await bind_view(state, sent, owner_id=owner_id, token=token, records=actions)
