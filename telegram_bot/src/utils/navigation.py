@@ -1,7 +1,5 @@
-"""A keyboard is a command on one user's current, expiring view."""
+"""A keyboard is a command on one user's current, owner-bound view."""
 import secrets
-import time
-from datetime import datetime, timezone
 
 from aiogram import BaseMiddleware
 from aiogram.filters.callback_data import CallbackData
@@ -23,12 +21,9 @@ def new_view_token():
 
 
 async def bind_view(state, message, *, owner_id, token, records=None):
-    expiry = time.time() + config.bot.ui_view_ttl_seconds
     await state.update_data(**{CURRENT_VIEW: {
         'token': token, 'owner_id': owner_id, 'chat_id': message.chat.id,
         'message_id': message.message_id,
-        'expires_at': expiry,
-        'expires_on': datetime.fromtimestamp(expiry, timezone.utc),
         'records': records or {},
     }})
 
@@ -42,7 +37,6 @@ async def require_current(callback, state, token):
         and view.get('owner_id') == callback.from_user.id
         and view.get('chat_id') == message.chat.id
         and view.get('message_id') == message.message_id
-        and view.get('expires_at', 0) > time.time()
     )
     if not valid:
         await callback.answer(STALE_VIEW_TEXT)
@@ -90,6 +84,21 @@ async def render_view(event, state, text, reply_markup, *, edit=None, owner_id=N
 
 class NavigationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
+        state = data['state']
+        if not (await state.get_data()).get(CURRENT_VIEW):
+            message = event.message
+            user = data.get('user')
+            if (user is not None and message is not None
+                    and not isinstance(message, InaccessibleMessage)
+                    and message.chat.type == 'private'
+                    and message.chat.id == event.from_user.id
+                    and message.from_user is not None and message.from_user.is_bot
+                    and message.from_user.id == event.bot.id):
+                # A TTL from an older release may already have deleted the FSM.
+                # Never reconstruct or execute an action from an unbound button.
+                await _recover_menu(event, state, user)
+                await event.answer()
+                return
         raw = event.data or ''
         if raw.startswith('adm:'):
             return await handler(event, data)
@@ -101,7 +110,6 @@ class NavigationMiddleware(BaseMiddleware):
         except (ValueError, TypeError):
             await event.answer(STALE_VIEW_TEXT)
             return
-        state = data['state']
         if not await require_current(event, state, command.view):
             return
         view = (await state.get_data())[CURRENT_VIEW]
@@ -114,13 +122,23 @@ class NavigationMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-class ConversationExpiryMiddleware(BaseMiddleware):
+async def _recover_menu(event, state, user):
+    # Delayed import: menu rendering itself uses these navigation helpers.
+    from src.commands.main_menu import MAIN_MENU_TEXT, build_main_menu_keyboard
+
+    await state.clear()
+    await render_view(
+        event, state, MAIN_MENU_TEXT, build_main_menu_keyboard(user.is_admin),
+        edit=False, owner_id=event.from_user.id,
+    )
+
+
+class ConversationRecoveryMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         state = data['state']
-        if not (event.text or '').startswith('/') and await state.get_state():
+        if not (event.text or '').startswith('/'):
             view = (await state.get_data()).get(CURRENT_VIEW, {})
-            if view.get('expires_at', 0) <= time.time():
-                await state.clear()
-                await event.answer('Срок ввода истёк. Откройте /menu и начните заново.')
+            if not view and (await state.get_state() or not (event.photo or event.sticker)):
+                await _recover_menu(event, state, data['user'])
                 return
         return await handler(event, data)

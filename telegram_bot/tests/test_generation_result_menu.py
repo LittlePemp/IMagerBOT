@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.methods import EditMessageText, SendDocument, SendMessage
 from aiogram.types import CallbackQuery, Chat, Document, Message, Update, User
 
-from src.application.generation_result_menu import GenerationResultMenu
+from src.application.generation_result_menu import GenerationResultMenu, RESULT_MENU_TEXT
 from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
 from src.commands.image_generation.image_generation_states import ImageGenerationStates as S
 from src.commands.main_menu import register_handlers_main_menu, register_fallback
@@ -137,7 +137,7 @@ class GenerationResultMenuTests(unittest.IsolatedAsyncioTestCase):
     async def test_known_document_success_still_shows_menu_when_only_outbox_ack_fails(self):
         self.service.acknowledge_completion.side_effect = OSError('outbox unavailable')
         await self.notifier.deliver_once()
-        self.assertEqual(self.session.last[5].text, 'Главное меню')
+        self.assertEqual(self.session.last[5].text, RESULT_MENU_TEXT)
         self.service.fail_completion.assert_not_awaited()
 
     async def test_send_failure_does_not_show_a_success_menu(self):
@@ -168,5 +168,5 @@ class GenerationResultMenuTests(unittest.IsolatedAsyncioTestCase):
         identifier = Int64(6000000000)
         self.job['request']['client_context'] = {'user_id': identifier, 'chat_id': identifier}
         self.assertTrue(await self.menu(self.job))
-        self.assertEqual(self.session.last[int(identifier)].text, 'Главное меню')
+        self.assertEqual(self.session.last[int(identifier)].text, RESULT_MENU_TEXT)
         self.assertIs(type(self.users.get_user_by_id.await_args.args[0]), int)

@@ -3,7 +3,7 @@ from aiogram import F
 from aiogram.filters import StateFilter
 from .image_generation_states import ImageGenerationStates as S
 from . import wizard
-from .upload import receive_image, generation_job_id as _generation_job_id
+from .upload import receive_image, receive_latest_image, generation_job_id as _generation_job_id
 
 
 def register_handlers_image_generation(dp, uow):
@@ -23,3 +23,4 @@ def register_handlers_image_generation(dp, uow):
         S.selecting_image_group, S.waiting_for_image_upload,
     ))
     dp.message.register(receive_image, F.photo | F.sticker, S.waiting_for_image_upload)
+    dp.message.register(receive_latest_image, F.photo | F.sticker, StateFilter(None))

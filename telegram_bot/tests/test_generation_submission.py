@@ -318,7 +318,10 @@ class TestPublicGenerationAcknowledgement(unittest.IsolatedAsyncioTestCase):
                     await upload.receive_image(self.message, self.state, self.user, service, progress)
                 render.assert_not_awaited()
                 progress.watch.assert_awaited_once_with(self.message, job_id=private_id, actor_id=1, duplicate=duplicate)
-                self.state.clear.assert_awaited_once()
+                if duplicate:
+                    self.state.clear.assert_not_awaited()
+                else:
+                    self.state.clear.assert_awaited_once()
                 self.assertEqual(self.session.methods, [])
                 context = service.execute.await_args.kwargs['client_context']
                 self.assertTrue(context['display_name'].startswith('Alice_'))

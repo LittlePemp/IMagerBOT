@@ -86,6 +86,19 @@ class AdmissionRepository:
             return None
         return self._receipt(bucket, bucket['admissions'][-1], duplicate=True)
 
+    async def latest_request(self, actor_id):
+        """Recover reusable settings from the actor's durable accepted command."""
+        bucket = await self.collection.find_one(
+            {'actor_id': actor_id, 'admissions.0': {'$exists': True}},
+            {'actor_id': 1, 'admissions': {'$slice': -1}},
+            sort=[('date', -1), ('last_admitted_at', -1), ('created_at', -1)],
+        )
+        if not bucket or bucket.get('actor_id') != actor_id or not bucket.get('admissions'):
+            return None
+        document = bucket['admissions'][-1]['document']
+        self._validate_document(document, actor_id)
+        return deepcopy(document['request'])
+
     async def remaining(self, actor_id, now=None):
         bucket_id, day, _ = self._day(actor_id, self._now(now))
         document = await self.collection.find_one({'_id': bucket_id}, {'used': 1})

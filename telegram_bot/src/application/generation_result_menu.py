@@ -3,6 +3,12 @@ from src.commands.main_menu import MAIN_MENU_TEXT, build_main_menu_keyboard
 from src.utils.navigation import send_view
 
 
+RESULT_MENU_TEXT = (
+    f'{MAIN_MENU_TEXT}\n'
+    'Следующее фото или стикер можно отправить сразу — использую те же настройки.'
+)
+
+
 class GenerationResultMenu:
     def __init__(self, dispatcher, users, bot, *, fixed_admin_ids=()):
         self.dispatcher, self.users, self.bot = dispatcher, users, bot
@@ -27,7 +33,7 @@ class GenerationResultMenu:
             if user is None or (user.isbanned and not fixed_admin):
                 return False
             await send_view(
-                self.bot, state, chat_id, MAIN_MENU_TEXT,
+                self.bot, state, chat_id, RESULT_MENU_TEXT,
                 build_main_menu_keyboard(user.is_admin or fixed_admin), owner_id=actor_id,
             )
         return True

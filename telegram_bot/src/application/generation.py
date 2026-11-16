@@ -11,6 +11,10 @@ from src.models.image_build_params import ParamType
 from src.models.admission import AdmissionReceipt
 
 
+class GenerationSettingsUnavailable(ValueError):
+    """The conversation needs a fresh settings choice before another image."""
+
+
 def validate_output(result_size, cell_size):
     if (type(result_size) is not int or type(cell_size) is not int
             or not 0 < result_size <= config.limits.result_size
@@ -28,6 +32,25 @@ class SubmitGeneration:
         self.admissions = repositories.admission_repository
         self.fixed_admin_ids = frozenset(fixed_admin_ids)
 
+    async def previous_settings(self, actor_id):
+        """Reuse values, never an earlier image, seed, command or mutable preset."""
+        try:
+            request = await self.admissions.latest_request(actor_id)
+            if request is None:
+                return None
+            parameters = GenerationParameters(**request['parameters'])
+            validate_output(parameters.result_size, parameters.cell_size)
+        except (KeyError, TypeError, ValueError) as error:
+            raise GenerationSettingsUnavailable('Сохранённые настройки больше недоступны.') from error
+        return {
+            'image_group': parameters.group_name,
+            'image_size': parameters.result_size,
+            'inset_size': parameters.cell_size,
+            'noise_level': parameters.noise_level,
+            'insertion_format': parameters.insertion_format,
+            'alpha_channel': parameters.alpha_channel,
+        }
+
     async def _policy(self, actor_id, draft):
         try:
             GenerationParameters(
@@ -38,19 +61,19 @@ class SubmitGeneration:
             )
             validate_output(draft['image_size'], draft['inset_size'])
         except (KeyError, TypeError, ValueError) as error:
-            raise ValueError('Параметры сборки недопустимы. Выберите их заново.') from error
+            raise GenerationSettingsUnavailable('Параметры сборки недопустимы. Выберите их заново.') from error
         actor = await self.repositories.user_repository.get_user_by_id(actor_id)
         if actor is None or (actor.isbanned and actor_id not in self.fixed_admin_ids):
             raise AccessDenied('Приём изображений недоступен для этого аккаунта.')
         group = await self.repositories.image_group_repository.get_group_by_name(draft['image_group'])
         if group is None or not group.active:
-            raise ValueError('Библиотека больше недоступна. Выберите другую.')
+            raise GenerationSettingsUnavailable('Библиотека больше недоступна. Выберите другую.')
         for kind, selected in draft.get('selected_presets', {}).items():
             available = await self.repositories.image_build_params_repository.get_common_params(ParamType(kind))
             if not available.is_success or not any(
                 item.name == selected['name'] and item.value == selected['value'] for item in available.value
             ):
-                raise ValueError('Выбранный пресет изменён или удалён. Выберите параметры заново.')
+                raise GenerationSettingsUnavailable('Выбранный пресет изменён или удалён. Выберите параметры заново.')
         return actor_id in self.fixed_admin_ids or bool(actor.is_admin)
 
     async def _seed_day(self, actor_id, now):
@@ -66,7 +89,6 @@ class SubmitGeneration:
             raise ValueError('Очередь заполнена. Попробуйте отправить изображение позже.')
 
     async def execute(self, *, actor_id, draft, job_id, client_context, source_loader):
-        draft = deepcopy(draft)
         receipt = await self.admissions.find(job_id)
         if receipt is not None:
             if receipt.actor_id != actor_id:
@@ -82,6 +104,11 @@ class SubmitGeneration:
                 payload_hash=legacy['payload_hash'], duplicate=True,
                 actor_id=actor_id,
             )
+        if draft is None:
+            draft = await self.previous_settings(actor_id)
+            if draft is None:
+                raise GenerationSettingsUnavailable('Сначала выберите настройки для изображения.')
+        draft = deepcopy(draft)
         quota_exempt = await self._policy(actor_id, draft)
         now = datetime.now(timezone.utc)
         await self._seed_day(actor_id, now)

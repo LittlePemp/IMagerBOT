@@ -9,6 +9,7 @@ from imager_contracts.protocol import (
     BINARY_CONTENT_TYPE, JPEG_CONTENT_TYPE, WEBP_CONTENT_TYPE, TELEGRAM_JOB_ID_NAMESPACE,
 )
 from src.application.image_errors import image_aspect_error
+from src.application.generation import GenerationSettingsUnavailable
 from src.commands.common_keyboards import home_keyboard
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
 from src.infrastructure.services.telegram_files import validate_download_path
@@ -106,7 +107,16 @@ TelegramPhotoSource = TelegramImageSource
 
 
 async def receive_image(message, state, user, generation_service, generation_progress):
-    draft = await state.get_data()
+    await _receive_image(
+        message, state, user, generation_service, generation_progress, draft=await state.get_data(),
+    )
+
+
+async def receive_latest_image(message, state, user, generation_service, generation_progress):
+    await _receive_image(message, state, user, generation_service, generation_progress, draft=None)
+
+
+async def _receive_image(message, state, user, generation_service, generation_progress, *, draft):
     job_id = generation_job_id(message)
     try:
         source = TelegramImageSource(message, generation_service.gateway)
@@ -115,7 +125,7 @@ async def receive_image(message, state, user, generation_service, generation_pro
             actor_id=user.telegram_id, draft=draft, job_id=job_id,
             client_context={
                 'chat_id': message.chat.id, 'reply_to_message_id': message.message_id,
-                'generation_mode': draft.get('generation_mode', 'presets'),
+                'generation_mode': draft.get('generation_mode', 'presets') if draft is not None else 'repeat',
                 'display_name': new_result_filename(getattr(user, 'telegram_username', None)),
             }, source_loader=source,
         )
@@ -126,13 +136,20 @@ async def receive_image(message, state, user, generation_service, generation_pro
         await state.clear()
         await generation_progress.watch(message, job_id=error.job_id, actor_id=user.telegram_id)
         return
+    except GenerationSettingsUnavailable as error:
+        from .wizard import start
+        await start(message, state, prompt=f'{error}\nВыберите настройки, затем отправьте фото или стикер.')
+        return
     except (AccessDenied, UploadBusy, ValueError) as error:
         text = str(error)
         if contains_generation_reference(text, job_id=job_id) or 'задан' in text.casefold():
             text = 'Не удалось принять изображение. Проверьте параметры и попробуйте снова.'
         await render_view(message, state, text, home_keyboard())
         return
-    await state.clear()
+    # A replay can refer to an older image while a new form is already open.
+    # Only a newly accepted image completes the current conversation.
+    if not receipt.duplicate:
+        await state.clear()
     await generation_progress.watch(
         message, job_id=receipt.job_id, actor_id=user.telegram_id, duplicate=receipt.duplicate,
     )

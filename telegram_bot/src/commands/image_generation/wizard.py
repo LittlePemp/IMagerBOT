@@ -27,10 +27,10 @@ def keyboard(buttons):
     return builder.as_markup()
 
 
-async def start(event, state):
+async def start(event, state, prompt='Выберите способ ввода параметров:'):
     await state.clear()
     await state.set_state(S.choosing_generation_mode)
-    await render_view(event, state, 'Выберите способ ввода параметров:', keyboard([
+    await render_view(event, state, prompt, keyboard([
         ('Из пресетов (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
     ]))
 

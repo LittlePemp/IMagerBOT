@@ -34,6 +34,7 @@ from src.commands.main_menu import register_handlers_main_menu, register_fallbac
 from src.commands.admin_panel.pack_import import register_handlers_pack_import, register_pack_import_command
 from src.commands.support.support_handler import register_handlers_support
 from src.infrastructure.data.unit_of_work import get_uow
+from src.infrastructure.data.conversation_storage import preserve_conversations
 from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.notifier import GenerationNotifier
 from src.infrastructure.services.catalog_import_service import CatalogImportService
@@ -43,7 +44,7 @@ from src.utils.middlewares import logging_middleware
 from src.utils.middlewares.abuse_control import AbuseControlMiddleware, UploadGate
 from src.utils.middlewares.authentication_middleware import AuthenticationMiddleware
 from src.utils.middlewares.errors import ErrorBoundaryMiddleware
-from src.utils.navigation import ConversationExpiryMiddleware, NavigationMiddleware
+from src.utils.navigation import ConversationRecoveryMiddleware, NavigationMiddleware
 
 
 class SharedClientStorage(PyMongoStorage):
@@ -70,7 +71,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(AuthenticationMiddleware(repositories.user_repository))
     dp.callback_query.outer_middleware(NavigationMiddleware())
-    dp.message.outer_middleware(ConversationExpiryMiddleware())
+    dp.message.outer_middleware(ConversationRecoveryMiddleware())
     register_handlers_main_menu(dp)
     register_pack_import_command(dp)
     register_handlers_about(dp)
@@ -114,10 +115,8 @@ async def main():
     stop, tasks = asyncio.Event(), []
     try:
         repositories = get_uow(client[settings.database_name])
+        await preserve_conversations(client[settings.database_name][config.mongo.bot_fsm_collection])
         await repositories.initialize_indexes()
-        await client[settings.database_name][config.mongo.bot_fsm_collection].create_index(
-            'data._current_view.expires_on', expireAfterSeconds=0,
-        )
         await set_initial_admin(repositories)
         try:
             await imager_service.ensure_indexes()

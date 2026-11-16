@@ -104,11 +104,16 @@ class TestViewBinding(TelegramFixture):
         self.assertFalse(await require_current(self.callback('unused', message_id=11), self.state, 'current'))
         self.assertTrue(await require_current(self.callback('unused'), self.state, 'current'))
 
-    async def test_expired_or_inaccessible_view_is_rejected(self):
-        with patch('src.utils.navigation.time.time', return_value=100):
-            await bind_view(self.state, self.message(), owner_id=5, token='current')
-        with patch('src.utils.navigation.time.time', return_value=100 + config.bot.ui_view_ttl_seconds):
-            self.assertFalse(await require_current(self.callback('unused'), self.state, 'current'))
+    async def test_current_view_survives_old_expiry_metadata_but_inaccessible_view_is_rejected(self):
+        await bind_view(self.state, self.message(), owner_id=5, token='current')
+        current = (await self.state.get_data())[CURRENT_VIEW]
+        self.assertNotIn('expires_at', current)
+        self.assertNotIn('expires_on', current)
+        # Documents from previous releases can retain their old timestamp until
+        # the startup migration runs. It must not invalidate the current nonce.
+        current.update(expires_at=100, expires_on=datetime(1970, 1, 1, tzinfo=timezone.utc))
+        await self.state.update_data(**{CURRENT_VIEW: current})
+        self.assertTrue(await require_current(self.callback('unused'), self.state, 'current'))
         inaccessible = self.callback('unused').model_copy(update={
             'message': InaccessibleMessage(chat=Chat(id=5, type='private'), message_id=10, date=0),
         })
