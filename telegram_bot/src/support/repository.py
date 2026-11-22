@@ -1,19 +1,30 @@
 """Journaled support inbox, reply bindings and one-attempt recipient deliveries."""
 import asyncio
+import math
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from pymongo.errors import DuplicateKeyError
 from pymongo.write_concern import WriteConcern
 
+from imager_config.loader import config
 from .config import support_config
 
 
-CHANNELS = frozenset({'main_alert', 'support_copy', 'outbound_reply'})
+CHANNELS = frozenset({'support_copy', 'outbound_reply'})
 
 
 class SupportQueueFull(ValueError):
     pass
+
+
+class SupportRateLimited(ValueError):
+    """A durable accepted-message limit; failed attempts do not consume it."""
+    def __init__(self, retry_at, *, now):
+        self.retry_at = retry_at
+        self.retry_after_seconds = max(1, math.ceil((retry_at - now).total_seconds()))
+        super().__init__('Слишком часто. Подождите немного перед следующим сообщением.')
 
 
 def positive_id(value):
@@ -29,11 +40,15 @@ class SupportRepository:
         self.collection = collection.with_options(write_concern=WriteConcern(w=1, j=True))
         self.bot_id, self.policy = positive_id(bot_id), policy
         self._acceptance_lock = asyncio.Lock()
+        self.timezone = ZoneInfo(config.bot.timezone)
 
     async def ensure_indexes(self):
         await self.collection.create_index('expires_at', expireAfterSeconds=0)
         await self.collection.create_index([('bot_id', 1), ('kind', 1), ('created_at', 1)])
         await self.collection.create_index([('bot_id', 1), ('kind', 1), ('user_chat_id', 1)])
+        await self.collection.create_index([
+            ('bot_id', 1), ('kind', 1), ('user_chat_id', 1), ('created_at', -1),
+        ])
 
     @staticmethod
     def _now(now=None):
@@ -87,8 +102,7 @@ class SupportRepository:
             {'$match': scope},
             {'$project': {'recipients': {'$objectToArray': '$deliveries'}}},
             {'$unwind': '$recipients'},
-            {'$match': {'$or': [{'recipients.v.main_alert.state': 'pending'},
-                                  {'recipients.v.support_copy.state': 'pending'}]}},
+            {'$match': {'recipients.v.support_copy.state': 'pending'}},
             {'$group': {'_id': '$_id'}}, {'$count': 'total'},
         ])
         rows = await cursor.to_list(length=1)
@@ -107,6 +121,31 @@ class SupportRepository:
         if await self.stored_count() >= limit:
             raise SupportQueueFull('Поддержка сейчас занята. Попробуйте написать немного позже.')
 
+    async def _check_message_rate(self, user_id, moment):
+        # Only committed incoming records count. This history survives process
+        # replacement, successful delivery and administrator replies. The same
+        # single-process acceptance lock covers these reads and the insert.
+        scope = {'bot_id': self.bot_id, 'kind': 'incoming', 'user_chat_id': positive_id(user_id),
+                 'expires_at': {'$gt': moment}}
+        latest = await self.collection.find_one(scope, {'created_at': 1}, sort=[('created_at', -1)])
+        retries = []
+        if latest is not None:
+            due = latest['created_at'] + timedelta(seconds=self.policy.message_cooldown_seconds)
+            if due > moment:
+                retries.append(due)
+        window = dict(scope, created_at={'$gt': moment - timedelta(seconds=self.policy.rate_window_seconds)})
+        if await self.collection.count_documents(window) >= self.policy.max_messages_per_window:
+            first = await self.collection.find_one(window, {'created_at': 1}, sort=[('created_at', 1)])
+            retries.append(first['created_at'] + timedelta(seconds=self.policy.rate_window_seconds))
+        local_day = moment.astimezone(self.timezone).date()
+        start = datetime.combine(local_day, datetime.min.time(), self.timezone)
+        end = datetime.combine(local_day + timedelta(days=1), datetime.min.time(), self.timezone)
+        day = dict(scope, created_at={'$gte': start, '$lt': end})
+        if await self.collection.count_documents(day) >= self.policy.max_messages_per_day:
+            retries.append(end)
+        if retries:
+            raise SupportRateLimited(max(retries), now=moment)
+
     async def accept_user_message(self, payload, recipient_ids, now=None):
         payload, moment = self._payload(payload), self._now(now)
         identity = self._event_id('in', payload['chat_id'], payload['message_id'])
@@ -115,14 +154,15 @@ class SupportRepository:
             if await self.collection.find_one({'_id': identity}, {'_id': 1}):
                 return False
             if await self.pending_count(payload['user_id']) >= self.policy.max_pending_per_user:
-                raise SupportQueueFull('Слишком много сообщений ожидают ответа. Подождите немного.')
+                raise SupportQueueFull('Слишком много сообщений в очереди. Подождите немного.')
             if await self.pending_count() >= self.policy.max_pending_total:
                 raise SupportQueueFull('Поддержка сейчас занята. Попробуйте написать немного позже.')
             await self._check_storage(reserve_replies=True)
+            await self._check_message_rate(payload['user_id'], moment)
             row = {'_id': identity, 'bot_id': self.bot_id, 'kind': 'incoming', 'payload': payload,
                    'user_chat_id': payload['chat_id'], 'source_message_id': payload['message_id'],
                    'created_at': moment, 'expires_at': self._expiry(moment),
-                   'deliveries': {key: {'main_alert': self._pending(moment), 'support_copy': self._pending(moment)}
+                   'deliveries': {key: {'support_copy': self._pending(moment)}
                                   for key in sorted(recipients)}}
             return await self._insert(row)
 
@@ -236,14 +276,6 @@ class SupportRepository:
         target['user_chat_id'] = positive_id(target['user_chat_id'])
         target['source_message_id'] = positive_id(target['source_message_id'])
         return target
-
-    async def find_main_alert(self, admin_id, message_id):
-        """Let the main bot guard replies to its support alerts from generation."""
-        admin_id, message_id = positive_id(admin_id), positive_id(message_id)
-        return await self.collection.find_one({
-            'bot_id': self.bot_id, 'kind': 'incoming', 'expires_at': {'$gt': self._now()},
-            f'deliveries.{admin_id}.main_alert.message_id': message_id,
-        })
 
     async def accept_admin_reply(self, payload, target, now=None):
         payload, moment = self._payload(payload), self._now(now)

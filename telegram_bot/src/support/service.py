@@ -1,24 +1,21 @@
-"""Support routing across two bot identities without downloading Telegram files."""
+"""Bounded support routing entirely within the support bot."""
 import asyncio
-import re
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyParameters
+from aiogram.types import ReplyParameters
 
 from imager_config.loader import config
 from src.utils.loggers import exception_logger, service_logger
 from .config import support_config
-from .repository import SupportQueueFull
+from .repository import SupportQueueFull, SupportRateLimited
 
 
 SUPPORTED_TYPES = frozenset({'text', 'photo', 'document', 'video', 'voice', 'audio',
                              'sticker', 'animation', 'video_note'})
-TYPE_LABELS = {'text': 'Текст', 'photo': 'Фото', 'document': 'Файл', 'video': 'Видео',
-               'voice': 'Голосовое сообщение', 'audio': 'Аудио', 'sticker': 'Стикер',
-               'animation': 'Анимация', 'video_note': 'Видеосообщение'}
-CHANNELS = ('outbound_reply', 'support_copy', 'main_alert')
+CHANNELS = ('outbound_reply', 'support_copy')
 CUSTOMER_HELP = 'Опишите проблему. Можно приложить фото, видео или файл. Ответ придёт в этот чат.'
 STAFF_HELP = ('Поддержка подключена. Здесь появятся сообщения пользователей. '
               'Чтобы ответить пользователю, ответьте на его пересланное сообщение.')
@@ -38,19 +35,40 @@ def _clip_text(value, units):
 
 
 class SupportService:
-    def __init__(self, repository, users, main_bot, support_bot, support_url, *,
-                 fixed_admin_ids=(), policy=support_config):
-        parsed = urlsplit(support_url)
-        if (parsed.scheme != 'https' or parsed.netloc != 't.me' or parsed.query or parsed.fragment
-                or re.fullmatch(r'/[A-Za-z0-9_]+', parsed.path) is None):
-            raise ValueError('Support requires its own public Telegram bot link')
+    def __init__(self, repository, users, support_bot, *,
+                 fixed_admin_ids=(), policy=support_config, clock=time.monotonic):
         if int(support_bot.id) != repository.bot_id:
             raise ValueError('Support repository belongs to another bot')
         self.repository, self.users = repository, users
-        self.main_bot, self.support_bot, self.support_url = main_bot, support_bot, support_url
+        self.support_bot = support_bot
         self.fixed_admin_ids, self.policy = frozenset(fixed_admin_ids), policy
-        self._resume_at = {'main': 0.0, 'support': 0.0}
+        self._resume_at = 0.0
         self._channel_index = 0
+        self._clock, self._notices = clock, OrderedDict()
+
+    def _notice_allowed(self, actor_id, kind):
+        """At most one acknowledgement and one warning per user per minute.
+
+        This cache only bounds explanatory replies. Admission rate limits live
+        in Mongo and survive process replacement; evicting this cache cannot
+        make another customer message reach an administrator.
+        """
+        now = self._clock()
+        while self._notices and next(iter(self._notices.values())) <= now - config.bot.throttle_idle_seconds:
+            self._notices.popitem(last=False)
+        key = actor_id, kind
+        previous = self._notices.get(key)
+        if previous is not None and now - previous < self.policy.notice_cooldown_seconds:
+            return False
+        if key not in self._notices and len(self._notices) >= config.bot.throttle_user_capacity:
+            self._notices.popitem(last=False)
+        self._notices[key] = now
+        self._notices.move_to_end(key)
+        return True
+
+    async def _notice(self, message, user, text, *, kind='warning'):
+        if self._notice_allowed(user.telegram_id, kind):
+            await message.answer(text)
 
     async def is_admin(self, identifier):
         if identifier in self.fixed_admin_ids:
@@ -89,75 +107,51 @@ class SupportService:
         self._verify_private(message, user)
         if await self.is_admin(user.telegram_id):
             await self.repository.activate_admin(user.telegram_id)
-            await message.answer(STAFF_HELP)
+            await self._notice(message, user, STAFF_HELP, kind='help')
         else:
-            await message.answer(CUSTOMER_HELP)
+            await self._notice(message, user, CUSTOMER_HELP, kind='help')
 
     async def accept_user_message(self, message, user):
         payload = self._payload(message, user)
         if payload is None:
-            await message.answer(UNSUPPORTED_TEXT)
+            await self._notice(message, user, UNSUPPORTED_TEXT)
             return False
         actor = await self.users.get_user_by_id(user.telegram_id)
         if actor is None or (actor.isbanned and user.telegram_id not in self.fixed_admin_ids):
             raise ValueError('Приём сообщений недоступен для этого аккаунта.')
         try:
             accepted = await self.repository.accept_user_message(payload, await self._recipients())
-        except SupportQueueFull as error:
-            await message.answer(str(error))
+        except (SupportQueueFull, SupportRateLimited) as error:
+            await self._notice(message, user, str(error))
             return False
         if accepted:
-            await message.answer('Сообщение принято. Ответ придёт в этот чат.')
+            await self._notice(message, user, 'Сообщение принято. Ответ придёт в этот чат.', kind='acknowledgement')
         return accepted
 
     async def accept_admin_reply(self, message, user):
         self._verify_private(message, user)
         if not await self.is_admin(user.telegram_id):
-            await message.answer('Доступ к ответам поддержки недоступен для этого аккаунта.')
+            await self._notice(message, user, 'Доступ к ответам поддержки недоступен для этого аккаунта.')
             return False
         original = message.reply_to_message
         if (original is None or original.from_user is None
                 or original.from_user.id != self.support_bot.id or not original.from_user.is_bot):
-            await message.answer(REPLY_HELP)
+            await self._notice(message, user, REPLY_HELP)
             return False
         target = await self.repository.get_reply_target(user.telegram_id, original.message_id)
         if target is None:
-            await message.answer(REPLY_HELP)
+            await self._notice(message, user, REPLY_HELP)
             return False
         payload = self._payload(message, user)
         if payload is None:
-            await message.answer(UNSUPPORTED_TEXT)
+            await self._notice(message, user, UNSUPPORTED_TEXT)
             return False
         try:
             accepted = await self.repository.accept_admin_reply(payload, target)
         except SupportQueueFull as error:
-            await message.answer(str(error))
+            await self._notice(message, user, str(error))
             return False
-        if accepted:
-            await message.answer('Ответ принят.')
         return accepted
-
-    async def redirect_main_reply(self, message):
-        await message.answer(
-            'Ответьте пользователю в боте поддержки: откройте его и ответьте на пересланное сообщение.',
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text='Открыть и ответить', url=self.support_url + '?start=staff'),
-            ]]),
-        )
-
-    def _main_notice(self, event):
-        payload = event['payload']
-        name = _label(payload.get('name'), 'Пользователь', self.policy.name_max_length)
-        username = payload.get('username')
-        if isinstance(username, str) and re.fullmatch(r'[A-Za-z0-9_]+', username):
-            name += f' (@{username})'
-        kind = TYPE_LABELS.get(payload.get('content_type'), 'Сообщение')
-        text = (f'📨 Сообщение в поддержку\nОт: {name}\n'
-                f"Telegram ID: {payload['user_id']}\nТип: {kind}\n"
-                'Ответьте в боте поддержки по кнопке ниже.')
-        if payload.get('text'):
-            text += '\n\n' + payload['text']
-        return _clip_text(text, self.policy.max_text_length)
 
     async def _eligible(self, candidate):
         event, recipient = candidate['event'], candidate['recipient_id']
@@ -171,14 +165,6 @@ class SupportService:
     async def _send(self, candidate):
         event, recipient, channel = candidate['event'], candidate['recipient_id'], candidate['channel']
         payload = event['payload']
-        if channel == 'main_alert':
-            return await self.main_bot.send_message(
-                chat_id=recipient, text=self._main_notice(event), parse_mode=None,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text='Открыть и ответить', url=self.support_url + '?start=staff'),
-                ]]),
-            )
         if channel == 'support_copy':
             # Both source and destination belong to this support bot. Telegram
             # retains the original text, captions and media without a download.
@@ -194,13 +180,12 @@ class SupportService:
 
     async def deliver_once(self):
         loop = asyncio.get_running_loop()
+        if loop.time() < self._resume_at:
+            return False
         candidate = None
         for offset in range(len(CHANNELS)):
             index = (self._channel_index + offset) % len(CHANNELS)
             channel = CHANNELS[index]
-            bot_kind = 'main' if channel == 'main_alert' else 'support'
-            if loop.time() < self._resume_at[bot_kind]:
-                continue
             active = await self.repository.active_admin_ids() if channel == 'support_copy' else None
             candidate = await self.repository.next_delivery(channel, active_admin_ids=active)
             if candidate is not None:
@@ -233,8 +218,7 @@ class SupportService:
             raise
         except TelegramRetryAfter as error:
             delay = max(error.retry_after, 0) + config.bot.notification_retry_after_grace_seconds
-            bot_kind = 'main' if channel == 'main_alert' else 'support'
-            self._resume_at[bot_kind] = loop.time() + delay
+            self._resume_at = loop.time() + delay
             await self.repository.finish_delivery(
                 event_id, admin_id, channel, state='pending', error=error,
                 retry_at=datetime.now(timezone.utc) + timedelta(seconds=delay),

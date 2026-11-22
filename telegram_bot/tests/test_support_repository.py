@@ -11,7 +11,7 @@ from bson.codec_options import CodecOptions
 from bson.int64 import Int64
 
 from src.support.config import support_config
-from src.support.repository import SupportQueueFull, SupportRepository
+from src.support.repository import SupportQueueFull, SupportRateLimited, SupportRepository
 
 
 MISSING = object()
@@ -45,6 +45,10 @@ def matches(row, query):
                     return False
                 if operation == '$lte' and (value is MISSING or value > operand):
                     return False
+                if operation == '$gte' and (value is MISSING or value < operand):
+                    return False
+                if operation == '$lt' and (value is MISSING or value >= operand):
+                    return False
                 if operation == '$in' and value not in operand:
                     return False
         elif value != condition:
@@ -72,8 +76,11 @@ class Collection:
     async def create_index(self, *args, **kwargs):
         self.indexes.append((args, kwargs))
 
-    async def find_one(self, query, projection=None):
-        return deepcopy(next((row for row in self.rows.values() if matches(row, query)), None))
+    async def find_one(self, query, projection=None, sort=None):
+        rows = [row for row in self.rows.values() if matches(row, query)]
+        for field, direction in reversed(sort or []):
+            rows.sort(key=lambda row: value_at(row, field), reverse=direction < 0)
+        return deepcopy(rows[0] if rows else None)
 
     def find(self, query, projection=None):
         return Cursor([row for row in self.rows.values() if matches(row, query)])
@@ -149,39 +156,40 @@ class SupportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.repo.accept_user_message(original, [99, 99, 101]))
         original['text'] = 'changed later'
         self.assertFalse(await self.repo.accept_user_message(payload(), [99, 101]))
-        candidate = await self.repo.next_delivery('main_alert')
+        candidate = await self.repo.next_delivery('support_copy')
         self.assertEqual(candidate['event']['payload']['text'], 'Нужна помощь')
         self.assertEqual(set(candidate['event']['deliveries']), {'99', '101'})
+        self.assertEqual(set(candidate['event']['deliveries']['99']), {'support_copy'})
         self.assertEqual(self.collection.write_concern, {'w': 1, 'j': True})
         self.assertEqual(await self.repo.pending_count(7), 1)
 
     async def test_concurrent_reservations_allow_one_attempt_and_unknown_outcome_is_not_retried(self):
         await self.repo.accept_user_message(payload(), [99])
-        event = (await self.repo.next_delivery('main_alert'))['event_id']
-        results = await asyncio.gather(*[self.repo.reserve_delivery(event, 99, 'main_alert') for _ in range(12)])
+        event = (await self.repo.next_delivery('support_copy'))['event_id']
+        results = await asyncio.gather(*[self.repo.reserve_delivery(event, 99, 'support_copy') for _ in range(12)])
         self.assertEqual(sum(results), 1)
-        self.assertIsNone(await self.repo.next_delivery('main_alert'))
-        self.assertFalse(await self.repo.reserve_delivery(event, 99, 'main_alert'))
-        self.assertIsNotNone(await self.repo.next_delivery('support_copy', active_admin_ids=[99]))
+        self.assertIsNone(await self.repo.next_delivery('support_copy'))
+        self.assertFalse(await self.repo.reserve_delivery(event, 99, 'support_copy'))
 
     async def test_only_explicit_retry_time_can_return_reserved_delivery_to_pending(self):
         await self.repo.accept_user_message(payload(), [99])
-        candidate = await self.repo.next_delivery('main_alert')
+        candidate = await self.repo.next_delivery('support_copy')
         key = candidate['event_id']
-        await self.repo.reserve_delivery(key, 99, 'main_alert')
+        await self.repo.reserve_delivery(key, 99, 'support_copy')
         with self.assertRaises(ValueError):
-            await self.repo.finish_delivery(key, 99, 'main_alert', state='pending')
+            await self.repo.finish_delivery(key, 99, 'support_copy', state='pending')
         retry = datetime.now(timezone.utc) + timedelta(minutes=1)
-        self.assertTrue(await self.repo.finish_delivery(key, 99, 'main_alert', state='pending', retry_at=retry))
-        self.assertIsNone(await self.repo.next_delivery('main_alert'))
-        self.assertIsNotNone(await self.repo.next_delivery('main_alert', now=retry))
+        self.assertTrue(await self.repo.finish_delivery(key, 99, 'support_copy', state='pending', retry_at=retry))
+        self.assertIsNone(await self.repo.next_delivery('support_copy'))
+        self.assertIsNotNone(await self.repo.next_delivery('support_copy', now=retry))
 
     async def test_unactivated_admin_does_not_block_an_activated_admin_or_other_channel(self):
         await self.repo.accept_user_message(payload(), [98, 99])
         self.assertIsNone(await self.repo.next_delivery('support_copy', active_admin_ids=[]))
         active = await self.repo.next_delivery('support_copy', active_admin_ids=[99])
         self.assertEqual(active['recipient_id'], 99)
-        self.assertIsNotNone(await self.repo.next_delivery('main_alert'))
+        with self.assertRaises(ValueError):
+            await self.repo.next_delivery('main_alert')
         await self.repo.activate_admin(99)
         self.assertEqual(await self.repo.active_admin_ids(), [99])
         marker = next(row for row in self.collection.rows.values() if row['kind'] == 'activation')
@@ -218,9 +226,9 @@ class SupportRepositoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_expired_events_and_mappings_are_not_used_before_ttl_cleanup(self):
         old = datetime.now(timezone.utc) - timedelta(seconds=support_config.retention_seconds + 1)
         await self.repo.accept_user_message(payload(), [99], now=old)
-        self.assertIsNone(await self.repo.next_delivery('main_alert'))
+        self.assertIsNone(await self.repo.next_delivery('support_copy'))
         self.assertEqual(await self.repo.pending_count(), 0)
-        self.assertFalse(await self.repo.reserve_delivery('in:100:7:1', 99, 'main_alert'))
+        self.assertFalse(await self.repo.reserve_delivery('in:100:7:1', 99, 'support_copy'))
         self.assertIsNone(await self.repo.get_event('in:100:7:1'))
         await self.repo.bind_admin_message(99, 40, 7, 1, 'in:100:7:1', now=old)
         self.assertIsNone(await self.repo.get_reply_target(99, 40))
@@ -246,7 +254,7 @@ class SupportRepositoryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(invalid=invalid.keys()), self.assertRaises(ValueError):
                 await self.repo.accept_user_message(invalid, [99])
         with self.assertRaises(ValueError):
-            await self.repo.reserve_delivery('in:100:7:1', '99.bad', 'main_alert')
+            await self.repo.reserve_delivery('in:100:7:1', '99.bad', 'support_copy')
         self.assertEqual(self.collection.rows, {})
 
     async def test_large_bot_user_and_admin_ids_survive_real_bson_roundtrips(self):
@@ -303,3 +311,71 @@ class SupportRepositoryTests(unittest.IsolatedAsyncioTestCase):
         row = self.collection.rows[candidate['event_id']]
         row['expires_at'] = datetime.now(timezone.utc) - timedelta(seconds=1)
         self.assertIsNone(await self.repo.get_reply_target(admin_id, 40))
+
+
+class DurableSupportRateTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.collection = Collection()
+        self.repo = SupportRepository(self.collection, bot_id=100)
+        self.now = datetime(2026, 11, 22, 9, tzinfo=timezone.utc)
+
+    async def accepted_and_delivered(self, identifier, moment):
+        self.assertTrue(await self.repo.accept_user_message(payload(identifier), [99], now=moment))
+        self.collection.rows[f'in:100:7:{identifier}']['deliveries']['99']['support_copy']['state'] = 'sent'
+
+    async def test_parallel_new_messages_admit_one_then_restart_cannot_reset_cooldown(self):
+        results = await asyncio.gather(*[
+            self.repo.accept_user_message(payload(identifier), [99], now=self.now)
+            for identifier in range(1, 13)
+        ], return_exceptions=True)
+        self.assertEqual(sum(item is True for item in results), 1)
+        self.assertEqual(sum(isinstance(item, SupportRateLimited) for item in results), 11)
+        replacement = SupportRepository(self.collection, bot_id=100)
+        with self.assertRaises(SupportRateLimited) as caught:
+            await replacement.accept_user_message(payload(20), [99], now=self.now + timedelta(seconds=9))
+        self.assertEqual(caught.exception.retry_after_seconds, 1)
+        self.assertTrue(await replacement.accept_user_message(payload(21), [99], now=self.now + timedelta(seconds=10)))
+
+    async def test_delivered_messages_still_count_toward_rolling_window_and_duplicate_does_not(self):
+        for identifier in range(1, 6):
+            await self.accepted_and_delivered(identifier, self.now + timedelta(seconds=(identifier - 1) * 10))
+        self.assertFalse(await self.repo.accept_user_message(payload(1), [99], now=self.now + timedelta(seconds=50)))
+        with self.assertRaises(SupportRateLimited) as caught:
+            await self.repo.accept_user_message(payload(6), [99], now=self.now + timedelta(seconds=50))
+        self.assertEqual(caught.exception.retry_after_seconds, 550)
+        replacement = SupportRepository(self.collection, bot_id=100)
+        self.assertTrue(await replacement.accept_user_message(payload(6), [99], now=self.now + timedelta(seconds=600)))
+        self.assertEqual(sum(row['kind'] == 'incoming' for row in self.collection.rows.values()), 6)
+
+    async def test_moscow_daily_limit_survives_delivery_restart_and_resets_at_local_midnight(self):
+        for identifier in range(1, 21):
+            await self.accepted_and_delivered(identifier, self.now + timedelta(seconds=(identifier - 1) * 601))
+        replacement = SupportRepository(self.collection, bot_id=100)
+        with self.assertRaises(SupportRateLimited) as caught:
+            await replacement.accept_user_message(payload(21), [99], now=self.now + timedelta(seconds=20 * 601))
+        midnight = datetime(2026, 11, 22, 21, tzinfo=timezone.utc)
+        self.assertEqual(caught.exception.retry_at, midnight)
+        self.assertTrue(await replacement.accept_user_message(payload(21), [99], now=midnight))
+
+    async def test_capacity_rejection_and_other_actors_do_not_consume_this_users_rate(self):
+        repo = SupportRepository(self.collection, bot_id=100,
+                                 policy=replace(support_config, max_pending_per_user=1))
+        self.assertTrue(await repo.accept_user_message(payload(1), [99], now=self.now))
+        due = self.now + timedelta(seconds=10)
+        with self.assertRaises(SupportQueueFull):
+            await repo.accept_user_message(payload(2), [99], now=due)
+        self.collection.rows['in:100:7:1']['deliveries']['99']['support_copy']['state'] = 'sent'
+        self.assertTrue(await repo.accept_user_message(payload(2), [99], now=due))
+        self.assertTrue(await repo.accept_user_message(payload(1, user=8), [99], now=due))
+        self.assertEqual(sum(row['kind'] == 'incoming' for row in self.collection.rows.values()), 3)
+
+    async def test_bson_history_and_legacy_main_alert_do_not_create_a_main_delivery(self):
+        await self.accepted_and_delivered(1, self.now)
+        self.collection.rows['in:100:7:1']['deliveries']['99']['main_alert'] = {'state': 'pending', 'next_attempt_at': self.now}
+        self.collection.rows = {key: BSON.encode(row).decode(CodecOptions(tz_aware=True))
+                                for key, row in self.collection.rows.items()}
+        self.assertEqual(await self.repo.pending_count(7), 0)
+        with self.assertRaises(ValueError):
+            await self.repo.next_delivery('main_alert')
+        with self.assertRaises(SupportRateLimited):
+            await SupportRepository(self.collection, bot_id=100).accept_user_message(payload(2), [99], now=self.now)

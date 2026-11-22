@@ -5,7 +5,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
@@ -15,7 +15,8 @@ from aiogram.types import Chat, Message, MessageId, PhotoSize, Update, User as T
 
 from src.support.handlers import create_support_dispatcher
 from src.support.service import SupportService
-from src.support.repository import SupportQueueFull
+from src.support.repository import SupportQueueFull, SupportRateLimited, SupportRepository
+import test_support_repository as repository_tests
 
 
 def person(identifier, *, admin=False, banned=False):
@@ -39,7 +40,7 @@ class MemorySupport:
             '_id': identifier, 'payload': copy.deepcopy(payload), 'user_chat_id': payload['chat_id'],
             'source_message_id': payload['message_id'], 'deliveries': {
                 str(admin_id): {channel: {'state': 'pending', 'next_attempt_at': datetime.now(timezone.utc)}
-                                for channel in ('main_alert', 'support_copy')} for admin_id in recipient_ids
+                                for channel in ('support_copy',)} for admin_id in recipient_ids
             },
         }
         return True
@@ -118,14 +119,6 @@ class MemorySupport:
         }
         return True
 
-    async def find_main_alert(self, admin_id, message_id):
-        for event in self.events.values():
-            item = event['deliveries'].get(str(admin_id), {}).get('main_alert')
-            if item and item.get('message_id') == message_id:
-                return event
-        return None
-
-
 class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.repository = MemorySupport()
@@ -142,8 +135,7 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service = self.consumer()
 
     def consumer(self, *, fixed=()):
-        return SupportService(self.repository, self.users, self.main_bot, self.support_bot,
-                              'https://t.me/SupportBot', fixed_admin_ids=fixed)
+        return SupportService(self.repository, self.users, self.support_bot, fixed_admin_ids=fixed)
 
     def message(self, identifier=7, message_id=1, *, text='Помогите', photo=False, reply=None):
         return SimpleNamespace(
@@ -160,15 +152,11 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.accept_user_message(message, self.people[7])
         return message
 
-    async def test_admin_sees_main_alert_before_starting_support_and_media_waits(self):
+    async def test_media_waits_for_support_activation_and_never_messages_main(self):
         message = await self.accepted(photo=True)
-        await self.service.deliver_once()
-        notice = self.main_bot.send_message.await_args.kwargs
-        self.assertIn('Анна (@anna)', notice['text'])
-        self.assertIn('Скриншот', notice['text'])
-        self.assertIsNone(notice['parse_mode'])
-        self.assertTrue(notice['link_preview_options'].is_disabled)
-        self.assertEqual(notice['reply_markup'].inline_keyboard[0][0].url, 'https://t.me/SupportBot?start=staff')
+        self.assertFalse(await self.service.deliver_once())
+        self.assertFalse(hasattr(self.service, 'main_bot'))
+        self.main_bot.send_message.assert_not_awaited()
         self.support_bot.forward_message.assert_not_awaited()
         await self.repository.activate_admin(99)
         await self.service.deliver_once()
@@ -196,16 +184,20 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
         message = await self.accepted()
         self.assertFalse(await self.service.accept_user_message(message, self.people[7]))
         message.answer.assert_awaited_once()
+        await self.repository.activate_admin(99)
         await asyncio.gather(self.consumer().deliver_once(), self.consumer().deliver_once())
-        self.main_bot.send_message.assert_awaited_once()
+        self.main_bot.send_message.assert_not_awaited()
+        self.support_bot.forward_message.assert_awaited_once()
 
     async def test_unknown_send_outcome_survives_restart_without_repeating_that_channel(self):
         await self.accepted()
-        self.main_bot.send_message.side_effect = TimeoutError('Unknown response')
+        await self.repository.activate_admin(99)
+        self.support_bot.forward_message.side_effect = TimeoutError('Unknown response')
         await self.service.deliver_once()
-        self.assertEqual(self.repository.receipt('in:7:1', 99, 'main_alert')['state'], 'uncertain')
+        self.assertEqual(self.repository.receipt('in:7:1', 99, 'support_copy')['state'], 'uncertain')
         await self.consumer().deliver_once()
-        self.main_bot.send_message.assert_awaited_once()
+        self.support_bot.forward_message.assert_awaited_once()
+        self.main_bot.send_message.assert_not_awaited()
 
     async def test_known_forward_success_and_lost_ack_keep_reply_map_and_never_resend(self):
         await self.accepted()
@@ -233,26 +225,28 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_floodwait_only_retries_after_its_due_time(self):
         await self.accepted()
-        self.main_bot.send_message.side_effect = TelegramRetryAfter(
-            method=SendMessage(chat_id=99, text='test'), message='Too many requests', retry_after=1,
+        await self.repository.activate_admin(99)
+        self.support_bot.forward_message.side_effect = TelegramRetryAfter(
+            method=ForwardMessage(chat_id=99, from_chat_id=7, message_id=1), message='Too many requests', retry_after=1,
         )
         await self.service.deliver_once()
-        receipt = self.repository.receipt('in:7:1', 99, 'main_alert')
+        receipt = self.repository.receipt('in:7:1', 99, 'support_copy')
         self.assertEqual(receipt['state'], 'pending')
         await self.consumer().deliver_once()
-        self.main_bot.send_message.assert_awaited_once()
+        self.support_bot.forward_message.assert_awaited_once()
         receipt['next_attempt_at'] = datetime.now(timezone.utc) - timedelta(seconds=1)
-        self.main_bot.send_message.side_effect = None
+        self.support_bot.forward_message.side_effect = None
         await self.consumer().deliver_once()
-        self.assertEqual(self.main_bot.send_message.await_count, 2)
+        self.assertEqual(self.support_bot.forward_message.await_count, 2)
         self.assertEqual(receipt['state'], 'sent')
 
     async def test_revoked_or_banned_admin_cannot_receive_or_answer_existing_support(self):
         await self.accepted()
+        await self.repository.activate_admin(99)
         self.people[99].is_admin = False
         await self.service.deliver_once()
         self.main_bot.send_message.assert_not_awaited()
-        self.assertEqual(self.repository.receipt('in:7:1', 99, 'main_alert')['state'], 'skipped')
+        self.assertEqual(self.repository.receipt('in:7:1', 99, 'support_copy')['state'], 'skipped')
         self.assertFalse(await self.service.accept_admin_reply(self.message(99, 2, reply=61), self.people[99]))
 
     async def test_staff_role_is_checked_again_before_a_queued_reply_is_sent(self):
@@ -278,14 +272,15 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.accept_user_message(self.message(), self.people[7])
         self.assertEqual(set(self.repository.events['in:7:1']['deliveries']), {'99', '100'})
 
-    async def test_untrusted_text_has_a_bounded_plain_text_alert_without_broken_emoji(self):
+    async def test_untrusted_text_stays_bounded_without_synthesizing_a_main_alert(self):
         message = self.message(text='<b>raw</b>\n' + '🙂' * 4000)
         await self.service.accept_user_message(message, self.people[7])
         await self.service.deliver_once()
-        text = self.main_bot.send_message.await_args.kwargs['text']
+        text = self.repository.events['in:7:1']['payload']['text']
         self.assertLessEqual(len(text.encode('utf-16-le')) // 2, self.service.policy.max_text_length)
         self.assertIn('<b>raw</b>', text)
         self.assertNotIn('\ufffd', text)
+        self.main_bot.send_message.assert_not_awaited()
 
     async def test_support_start_activates_only_staff_and_customer_receives_instructions(self):
         customer, staff = self.message(), self.message(99)
@@ -328,6 +323,74 @@ class SupportServiceTests(unittest.IsolatedAsyncioTestCase):
         message.reply_to_message.from_user.id = 123
         self.assertFalse(await self.service.accept_admin_reply(message, self.people[99]))
         self.repository.get_reply_target.assert_not_awaited()
+
+    async def test_twenty_message_spam_burst_stores_and_forwards_one_message_even_after_service_restart(self):
+        collection = repository_tests.Collection()
+        self.repository = SupportRepository(collection, bot_id=self.support_bot.id)
+        self.service = self.consumer()
+        await self.repository.activate_admin(99)
+        messages = [self.message(message_id=index) for index in range(1, 21)]
+        results = [await self.service.accept_user_message(message, self.people[7]) for message in messages]
+        self.assertEqual(sum(results), 1)
+        self.assertEqual(await self.repository.stored_count(), 1)
+        self.assertEqual(sum(message.answer.await_count for message in messages), 2)
+        await self.service.deliver_once()
+        await self.consumer().deliver_once()
+        self.support_bot.forward_message.assert_awaited_once_with(chat_id=99, from_chat_id=7, message_id=1)
+        self.main_bot.send_message.assert_not_awaited()
+        self.assertFalse(hasattr(self.service, 'main_bot'))
+        restarted = self.consumer()
+        self.assertFalse(await restarted.accept_user_message(self.message(message_id=21), self.people[7]))
+        self.assertEqual(await self.repository.stored_count(), 1)
+        await restarted.deliver_once()
+        self.support_bot.forward_message.assert_awaited_once()
+
+    async def test_acknowledgements_and_rejections_are_each_bounded_to_one_per_minute(self):
+        clock = [0.0]
+        service = SupportService(self.repository, self.users, self.support_bot, clock=lambda: clock[0])
+        messages = [self.message(message_id=index) for index in range(1, 13)]
+        for message in messages:
+            self.assertTrue(await service.accept_user_message(message, self.people[7]))
+        self.assertEqual(sum(message.answer.await_count for message in messages), 1)
+        clock[0] = service.policy.notice_cooldown_seconds
+        later = self.message(message_id=13)
+        await service.accept_user_message(later, self.people[7])
+        later.answer.assert_awaited_once()
+        self.repository.accept_user_message = AsyncMock(side_effect=SupportRateLimited(
+            datetime.now(timezone.utc) + timedelta(seconds=10),
+            now=datetime.now(timezone.utc),
+        ))
+        blocked = [self.message(message_id=index) for index in range(14, 34)]
+        for message in blocked:
+            self.assertFalse(await service.accept_user_message(message, self.people[7]))
+        self.assertEqual(sum(message.answer.await_count for message in blocked), 1)
+
+    async def test_notice_cache_has_a_bounded_capacity_and_discards_idle_entries(self):
+        clock = [0.0]
+        service = SupportService(self.repository, self.users, self.support_bot, clock=lambda: clock[0])
+        from dataclasses import replace
+        from src.support import service as module
+        with patch.object(module, 'config', SimpleNamespace(bot=replace(module.config.bot, throttle_user_capacity=2))):
+            self.assertTrue(service._notice_allowed(1, 'warning'))
+            self.assertTrue(service._notice_allowed(2, 'warning'))
+            self.assertTrue(service._notice_allowed(3, 'warning'))
+            self.assertEqual(len(service._notices), 2)
+            clock[0] += module.config.bot.throttle_idle_seconds + 1
+            self.assertTrue(service._notice_allowed(4, 'warning'))
+            self.assertEqual(len(service._notices), 1)
+
+    async def test_repeated_start_sends_one_help_but_still_keeps_staff_activated(self):
+        staff = self.message(99)
+        for _ in range(20):
+            await self.service.start(staff, self.people[99])
+        self.assertEqual(self.repository.active, {99})
+        staff.answer.assert_awaited_once()
+
+    async def test_staff_reply_does_not_create_an_extra_acknowledgement_message(self):
+        await self.repository.bind_admin_message(99, 61, 7, 1, 'original')
+        reply = self.message(99, 2, reply=61)
+        self.assertTrue(await self.service.accept_admin_reply(reply, self.people[99]))
+        reply.answer.assert_not_awaited()
 
 
 class SupportSession(BaseSession):
@@ -372,7 +435,7 @@ class SupportDispatcherTests(unittest.IsolatedAsyncioTestCase):
             get_admins=AsyncMock(return_value=[self.people[99]]), update_user_info=AsyncMock(),
         )
         self.repository = MemorySupport()
-        self.service = SupportService(self.repository, self.users, self.main_bot, self.bot, 'https://t.me/SupportBot')
+        self.service = SupportService(self.repository, self.users, self.bot)
         self.dispatcher = create_support_dispatcher(self.users, self.service)
         self.sequence = 0
         self.clock = time.monotonic()
@@ -404,7 +467,7 @@ class SupportDispatcherTests(unittest.IsolatedAsyncioTestCase):
         incoming = await self.send(7, photo=True)
         self.assertEqual(len(self.repository.events), 1)
         await self.service.deliver_once()
-        self.assertIsInstance(self.main_session.methods[-1], SendMessage)
+        self.assertEqual(self.main_session.methods, [])
         await self.send(99, '/start staff')
         await self.service.deliver_once()
         forwarded = self.session.last[99]
@@ -424,66 +487,3 @@ class SupportDispatcherTests(unittest.IsolatedAsyncioTestCase):
         await self.send(7, 'forged', reply=fake_reference)
         self.assertTrue(all(not key.startswith('reply:') for key in self.repository.events))
         self.assertEqual(next(iter(self.repository.events.values()))['user_chat_id'], 7)
-
-    async def test_main_support_alert_text_and_photo_replies_are_redirected_before_form_recovery_or_generation(self):
-        from telegram_bot.main import create_dispatcher
-
-        repositories = SimpleNamespace(user_repository=self.users, admission_repository=SimpleNamespace(),
-                                       image_group_repository=SimpleNamespace(), image_build_params_repository=SimpleNamespace())
-        main = create_dispatcher(repositories, SimpleNamespace(), support_service=self.service)
-        accepted = AsyncMock(return_value=SimpleNamespace(job_id='accepted', duplicate=False))
-        main['generation_service'] = SimpleNamespace(execute=accepted, gateway=object())
-        main['generation_progress'] = SimpleNamespace(watch=AsyncMock())
-        for middleware in main.update.outer_middleware:
-            if hasattr(middleware, 'limiter'):
-                middleware.limiter.clock = lambda: self.clock
-        await self.repository.accept_user_message({
-            'chat_id': 7, 'message_id': 1, 'user_id': 7, 'text': 'Help', 'content_type': 'text',
-        }, [99])
-        self.repository.receipt('in:7:1', 99, 'main_alert').update(state='sent', message_id=51)
-        original = Message(
-            message_id=51, date=datetime.now(timezone.utc), chat=Chat(id=99, type='private'),
-            from_user=TelegramUser(id=self.main_bot.id, first_name='Main', is_bot=True), text='Support notice',
-        )
-        try:
-            for photo in (False, True):
-                with self.subTest(photo=photo):
-                    self.sequence += 1
-                    self.clock += 20
-                    message = Message(
-                        message_id=self.sequence, date=datetime.now(timezone.utc),
-                        chat=Chat(id=99, type='private'), from_user=TelegramUser(id=99, first_name='Admin', is_bot=False),
-                        text=None if photo else 'Reply', reply_to_message=original,
-                        photo=[PhotoSize(file_id='photo', file_unique_id='photo', width=512, height=512)] if photo else None,
-                    ).as_(self.main_bot)
-                    await main.feed_update(self.main_bot, Update(update_id=self.sequence, message=message))
-                    self.assertIn('Ответьте пользователю в боте поддержки', self.main_session.last[99].text)
-                    state = main.fsm.get_context(bot=self.main_bot, chat_id=99, user_id=99)
-                    self.assertEqual(await state.get_data(), {})
-            accepted.assert_not_awaited()
-        finally:
-            await main.fsm.close()
-
-    async def test_unrelated_main_photo_reply_keeps_its_normal_generation_route(self):
-        from telegram_bot.main import create_dispatcher
-
-        repositories = SimpleNamespace(user_repository=self.users, admission_repository=SimpleNamespace(),
-                                       image_group_repository=SimpleNamespace(), image_build_params_repository=SimpleNamespace())
-        main = create_dispatcher(repositories, SimpleNamespace(), support_service=self.service)
-        accepted = AsyncMock(return_value=SimpleNamespace(job_id='accepted', duplicate=False))
-        main['generation_service'] = SimpleNamespace(execute=accepted, gateway=object())
-        main['generation_progress'] = SimpleNamespace(watch=AsyncMock())
-        original = Message(
-            message_id=52, date=datetime.now(timezone.utc), chat=Chat(id=99, type='private'),
-            from_user=TelegramUser(id=self.main_bot.id, first_name='Main', is_bot=True), text='Different menu',
-        )
-        message = Message(
-            message_id=4, date=datetime.now(timezone.utc), chat=Chat(id=99, type='private'),
-            from_user=TelegramUser(id=99, first_name='Admin', is_bot=False), reply_to_message=original,
-            photo=[PhotoSize(file_id='photo', file_unique_id='photo', width=512, height=512)],
-        ).as_(self.main_bot)
-        try:
-            await main.feed_update(self.main_bot, Update(update_id=4, message=message))
-            accepted.assert_awaited_once()
-        finally:
-            await main.fsm.close()

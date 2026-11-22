@@ -15,7 +15,7 @@ from pymongo import AsyncMongoClient
 
 from settings import settings
 from src.support.config import support_config
-from src.support.repository import SupportQueueFull, SupportRepository
+from src.support.repository import SupportQueueFull, SupportRateLimited, SupportRepository
 
 
 PREFIX = 'imager_support_audit_'
@@ -52,25 +52,31 @@ async def exercise(database):
     marker = await collection.find_one({'kind': 'activation'})
     assert 'expires_at' not in marker
 
-    candidate = await repo.next_delivery('main_alert', active_admin_ids=[99])
+    candidate = await repo.next_delivery('support_copy', active_admin_ids=[99])
     event_id = candidate['event_id']
-    claims = await asyncio.gather(*[repo.reserve_delivery(event_id, 99, 'main_alert') for _ in range(12)])
+    assert set(candidate['event']['deliveries']['99']) == {'support_copy'}
+    claims = await asyncio.gather(*[repo.reserve_delivery(event_id, 99, 'support_copy') for _ in range(12)])
     assert sum(claims) == 1
-    assert await repo.finish_delivery(event_id, 99, 'main_alert', state='sent', message_id=400)
-    assert (await repo.find_main_alert(99, 400))['_id'] == event_id
-    assert await repo.find_main_alert(101, 400) is None
-    assert await repo.next_delivery('main_alert', active_admin_ids=[99]) is None
-
-    pending = await repo.next_delivery('support_copy', active_admin_ids=[99])
-    assert pending['event_id'] == event_id and pending['recipient_id'] == 99
-    assert await repo.reserve_delivery(event_id, 99, 'support_copy')
-    retry = datetime.now(timezone.utc) + timedelta(seconds=60)
-    assert await repo.finish_delivery(event_id, 99, 'support_copy', state='pending', retry_at=retry)
+    assert await repo.finish_delivery(event_id, 99, 'support_copy', state='sent', message_id=400)
     assert await repo.next_delivery('support_copy', active_admin_ids=[99]) is None
-    assert (await repo.next_delivery('support_copy', active_admin_ids=[99], now=retry))['event_id'] == event_id
-    # Another activated recipient is not hidden behind the future retry.
+    try:
+        await repo.next_delivery('main_alert')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Support unexpectedly has a main-bot delivery channel')
+
+    pending = await repo.next_delivery('support_copy', active_admin_ids=[101])
+    assert pending['event_id'] == event_id and pending['recipient_id'] == 101
+    assert await repo.reserve_delivery(event_id, 101, 'support_copy')
+    retry = datetime.now(timezone.utc) + timedelta(seconds=60)
+    assert await repo.finish_delivery(event_id, 101, 'support_copy', state='pending', retry_at=retry)
+    assert await repo.next_delivery('support_copy', active_admin_ids=[101]) is None
+    assert (await repo.next_delivery('support_copy', active_admin_ids=[101], now=retry))['event_id'] == event_id
+    # A message from another customer is not hidden behind the future retry.
     await repo.activate_admin(101)
-    assert (await repo.next_delivery('support_copy', active_admin_ids=await repo.active_admin_ids()))['recipient_id'] == 101
+    assert await repo.accept_user_message(payload(1, actor=8), [99])
+    assert (await repo.next_delivery('support_copy', active_admin_ids=await repo.active_admin_ids()))['recipient_id'] == 99
 
     await repo.bind_admin_message(99, 40, 7, 1, event_id)
     target = await repo.get_reply_target(99, 40)
@@ -106,8 +112,8 @@ async def exercise(database):
     expired = SupportRepository(database['expired'], bot_id=100)
     await expired.accept_user_message(payload(), [99], now=old)
     assert await expired.pending_count() == 0 and await expired.stored_count() == 0
-    assert await expired.next_delivery('main_alert') is None
-    assert not await expired.reserve_delivery('in:100:7:1', 99, 'main_alert')
+    assert await expired.next_delivery('support_copy') is None
+    assert not await expired.reserve_delivery('in:100:7:1', 99, 'support_copy')
 
     # These identities are necessarily BSON Int64 at the real Mongo boundary.
     large = SupportRepository(database['large_ids'], bot_id=9000000001)
@@ -130,11 +136,46 @@ async def exercise(database):
     answer = await large.next_delivery('outbound_reply')
     assert answer['recipient_id'] == 6000000000
     assert await large.reserve_delivery(answer['event_id'], answer['recipient_id'], 'outbound_reply')
+
+    rate = SupportRepository(database['rate'], bot_id=100)
+    await rate.ensure_indexes()
+    moment = datetime.now(timezone.utc).replace(microsecond=0)
+    burst = await asyncio.gather(*[
+        rate.accept_user_message(payload(identifier), [], now=moment) for identifier in range(1, 13)
+    ], return_exceptions=True)
+    assert sum(item is True for item in burst) == 1
+    assert sum(isinstance(item, SupportRateLimited) for item in burst) == 11
+    stored = await database['rate'].find_one({'kind': 'incoming'})
+    replacement = SupportRepository(database['rate'], bot_id=100)
+    assert not await replacement.accept_user_message(payload(stored['source_message_id']), [], now=moment)
+    for identifier in range(20, 24):
+        await replacement.accept_user_message(payload(identifier), [], now=moment + timedelta(seconds=(identifier - 19) * 10))
+    try:
+        await replacement.accept_user_message(payload(30), [], now=moment + timedelta(seconds=50))
+    except SupportRateLimited as error:
+        assert error.retry_after_seconds == 550
+    else:
+        raise AssertionError('Restart or delivered messages bypassed the rolling support quota')
+    assert await replacement.accept_user_message(payload(30), [], now=moment + timedelta(seconds=600))
+
+    daily = SupportRepository(database['daily'], bot_id=100)
+    morning = moment.replace(hour=9, minute=0, second=0)
+    for identifier in range(1, 21):
+        assert await daily.accept_user_message(payload(identifier), [], now=morning + timedelta(seconds=(identifier - 1) * 601))
+    try:
+        await SupportRepository(database['daily'], bot_id=100).accept_user_message(
+            payload(21), [], now=morning + timedelta(seconds=20 * 601))
+    except SupportRateLimited as error:
+        assert error.retry_at == morning.replace(hour=21)
+    else:
+        raise AssertionError('Daily support quota was bypassed after process replacement')
+    assert await daily.accept_user_message(payload(21), [], now=morning.replace(hour=21))
     return {'passed': True, 'parallel_reservations': len(claims), 'reserved_once': sum(claims),
             'unique_acceptance': True, 'bot_admin_mapping_isolation': True,
             'reply_routing': True, 'unknown_delivery_never_retried': True,
             'explicit_floodwait_scheduling': True, 'capacity_and_retention': True,
-            'activation_does_not_expire': True, 'main_alert_reply_guard_lookup': True,
+            'activation_does_not_expire': True, 'support_only_channel': True,
+            'parallel_incoming_admitted_once': True, 'durable_cooldown_window_and_calendar_day': True,
             'large_bot_user_admin_bson_int64_roundtrip': True, 'reply_map_projection_recovered_from_receipt': True}
 
 

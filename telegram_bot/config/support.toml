@@ -2,7 +2,12 @@
 collection = "support_messages"
 retention_seconds = 2592000
 poll_seconds = 2.0
-max_pending_per_user = 20
+notice_cooldown_seconds = 60
+max_pending_per_user = 5
+message_cooldown_seconds = 10
+rate_window_seconds = 600
+max_messages_per_window = 5
+max_messages_per_day = 20
 max_pending_total = 200
 max_stored_events = 5000
 max_text_length = 4096

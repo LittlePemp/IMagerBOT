@@ -15,7 +15,12 @@ class SupportConfig:
     collection: str
     retention_seconds: int
     poll_seconds: float
+    notice_cooldown_seconds: int
     max_pending_per_user: int
+    message_cooldown_seconds: int
+    rate_window_seconds: int
+    max_messages_per_window: int
+    max_messages_per_day: int
     max_pending_total: int
     max_stored_events: int
     max_text_length: int
@@ -44,6 +49,16 @@ def load_support_config(path=DEFAULT_PATH):
         raise ValueError('Support per-user inbox cannot exceed its total capacity')
     if values['max_pending_total'] >= values['max_stored_events']:
         raise ValueError('Support archive must leave capacity for pending-message replies')
+    if values['message_cooldown_seconds'] > values['rate_window_seconds']:
+        raise ValueError('Support cooldown must fit inside its rate window')
+    if values['rate_window_seconds'] > 24 * 60 * 60:
+        raise ValueError('Support rate window must fit inside a calendar day')
+    if values['max_messages_per_window'] > values['max_messages_per_day']:
+        raise ValueError('Support window quota cannot exceed the daily quota')
+    if values['retention_seconds'] < max(values['rate_window_seconds'], 24 * 60 * 60):
+        raise ValueError('Support retention must preserve the complete rate-limit history')
+    if values['notice_cooldown_seconds'] > values['retention_seconds']:
+        raise ValueError('Support notices cannot outlive the retained rate-limit history')
     try:
         datetime.now(timezone.utc) + timedelta(seconds=values['retention_seconds'])
     except (OverflowError, ValueError) as error:

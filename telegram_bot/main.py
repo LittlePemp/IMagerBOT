@@ -41,7 +41,7 @@ from src.infrastructure.services.imager_service.notifier import GenerationNotifi
 from src.infrastructure.services.catalog_import_service import CatalogImportService
 from src.models.user import User, UserStatus
 from src.support.config import support_config
-from src.support.handlers import create_support_dispatcher, register_main_support_reply_guard
+from src.support.handlers import create_support_dispatcher
 from src.support.polling import poll_dispatchers
 from src.support.repository import SupportRepository
 from src.support.service import SupportService
@@ -60,7 +60,7 @@ class SharedClientStorage(PyMongoStorage):
 
 
 def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None,
-                      watermark_text=None, support_bot_url=None, support_service=None):
+                      watermark_text=None, support_bot_url=None):
     gate = upload_gate or UploadGate()
     # Register FSM after the cheap abuse gate, before database-backed actor/UI.
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
@@ -79,8 +79,6 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(AuthenticationMiddleware(repositories.user_repository))
     dp.callback_query.outer_middleware(NavigationMiddleware())
-    if support_service is not None:
-        register_main_support_reply_guard(dp, support_service)
     dp.message.outer_middleware(ConversationRecoveryMiddleware())
     register_handlers_main_menu(dp)
     register_pack_import_command(dp)
@@ -157,14 +155,14 @@ async def main():
             )
             await support_repository.ensure_indexes()
             support_service = SupportService(
-                support_repository, repositories.user_repository, bot, support_bot, support_bot_url,
+                support_repository, repositories.user_repository, support_bot,
                 fixed_admin_ids=settings.telegram_admin_ids,
             )
             support_dispatcher = create_support_dispatcher(repositories.user_repository, support_service)
         dispatcher = create_dispatcher(repositories, imager_service, upload_gate=gate, storage=SharedClientStorage(
             client, db_name=settings.database_name, collection_name=config.mongo.bot_fsm_collection,
         ), progress=progress, watermark_text=watermark_text,
-            support_bot_url=support_bot_url, support_service=support_service)
+            support_bot_url=support_bot_url)
         imports = dispatcher['catalog_import_service']
         await imports.ensure_indexes()
         result_menu = GenerationResultMenu(
