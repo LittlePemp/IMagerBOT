@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 from imager_config.loader import config
+from imager_contracts import validate_watermark_text
 from imager_contracts.protocol import (
     JPEG_CONTENT_TYPE, JOB_ID_PATTERN, PERCENT_MAX, SEED_UPPER_BOUND,
 )
@@ -12,6 +13,7 @@ configure_decoder_limits()
 
 import cv2
 from src.application.image_builder.services.imager_builder import ImagerBuilder
+from src.application.image_builder.services.watermark import apply_watermark
 from src.domain.image_builder.value_objects.image_build_params import (
     AlphaChannel, CellSize, ImageGroup, ImageInsertionFormat, NoiseLevel, ResultSize,
 )
@@ -77,6 +79,10 @@ class ObjectRenderExecutor:
             seed = request.get('seed')
             if type(seed) is not int or not 0 <= seed < SEED_UPPER_BOUND:
                 raise RenderRejected(f'Seed must be an integer between 0 and {SEED_UPPER_BOUND - 1}')
+            try:
+                watermark_text = validate_watermark_text(request.get('watermark_text'))
+            except ValueError as error:
+                raise RenderRejected(str(error)) from error
             self.store.validate_reference(request.get('source'), config.limits.source_file_bytes)
             manifest_ref = request.get('catalog_manifest')
             if not manifest_ref:
@@ -102,10 +108,14 @@ class ObjectRenderExecutor:
                 rendered = builder.render_image(source, parameters['group_name'], heartbeat)
                 if not rendered:
                     raise RenderFailed(rendered.error)
+                if watermark_text is not None:
+                    heartbeat({'stage': 'watermarking_result'})
+                output = apply_watermark(rendered.value, watermark_text)
+                rendered = None
                 heartbeat({'stage': 'encoding_result'})
                 require_memory(config.memory.encode_reserve_bytes)
                 result_path = Path(directory) / config.storage.result_filename
-                written = cv2.imwrite(str(result_path), rendered.value, [
+                written = cv2.imwrite(str(result_path), output, [
                     int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality,
                 ])
                 if not written or not result_path.is_file() or result_path.stat().st_size == 0:

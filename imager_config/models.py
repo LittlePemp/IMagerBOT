@@ -46,6 +46,22 @@ class RuntimeRenderConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeWatermarkConfig:
+    font_height_fraction: float
+    min_font_height_pixels: int
+    max_font_height_pixels: int
+    preferred_width_fraction: float
+    margin_fraction: float
+    min_margin_pixels: int
+    padding_pixels: int
+    stroke_fraction: float
+    outline_pixels: int
+    background_opacity: float
+    foreground_bgr: tuple[int, ...]
+    background_bgr: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class RuntimeImageConfig:
     min_width: int
     min_height: int
@@ -389,6 +405,7 @@ class RuntimeConfig:
     limits: RuntimeLimitsConfig
     memory: RuntimeMemoryConfig
     render: RuntimeRenderConfig
+    watermark: RuntimeWatermarkConfig
     image: RuntimeImageConfig
     storage: RuntimeStorageConfig
     catalog: RuntimeCatalogConfig

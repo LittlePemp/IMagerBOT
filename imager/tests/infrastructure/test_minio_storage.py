@@ -270,6 +270,61 @@ class TestMinioStorage(unittest.TestCase):
             executor.execute({'job_id': 'job', 'parameters': {}}, 'token')
         self.assertEqual(self.client.get_count, 0)
 
+    def test_watermark_is_part_of_the_published_jpeg_and_keeps_normal_dimensions(self):
+        group = self.prepare_catalog()
+        source = self.root / 'source.png'
+        cv2.imwrite(str(source), np.full((24, 32, 3), 100, dtype=np.uint8))
+        source_ref = self.store.upload_file(source, 'uploads/branded/source.png', 'image/png')
+        request = dict(job_id='branded', source=source_ref, catalog_manifest=group['manifest'], seed=5,
+                       parameters=dict(group_name='cats', insertion_format='crop', alpha_channel=0,
+                                       noise_level=0, result_size=16, cell_size=40))
+        executor = ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store))
+        plain = executor.execute(request, 'plain')
+        stages = []
+        request['watermark_text'] = 't.me/ExampleBot'
+        marked = executor.execute(request, 'marked', stages.append)
+        self.assertNotEqual(plain['sha256'], marked['sha256'])
+        decoded = []
+        for reference in (plain, marked):
+            encoded = self.client.objects[reference['bucket'], reference['key']][0]
+            self.assertTrue(encoded.startswith(b'\xff\xd8'))
+            decoded.append(cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR))
+        self.assertEqual(decoded[0].shape, decoded[1].shape)
+        self.assertEqual(decoded[1].shape, (480, 640, 3))
+        np.testing.assert_array_equal(decoded[0][:32], decoded[1][:32])
+        self.assertFalse(np.array_equal(decoded[0], decoded[1]))
+        self.assertIn('watermarking_result', [stage['stage'] for stage in stages])
+        repeated = executor.execute(request, 'same-request-again')
+        self.assertEqual(repeated['sha256'], marked['sha256'])
+
+    def test_tiny_result_keeps_a_readable_watermark_in_a_bounded_canvas(self):
+        group = self.prepare_catalog()
+        source = self.root / 'tiny-source.png'
+        cv2.imwrite(str(source), np.full((24, 32, 3), 100, dtype=np.uint8))
+        request = dict(job_id='tiny', seed=5, catalog_manifest=group['manifest'],
+                       source=self.store.upload_file(source, 'uploads/tiny/source.png'),
+                       watermark_text='t.me/ExampleBot',
+                       parameters=dict(group_name='cats', insertion_format='crop', alpha_channel=0,
+                                       noise_level=0, result_size=4, cell_size=3))
+        reference = ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store)).execute(request, 'marked')
+        encoded = self.client.objects[reference['bucket'], reference['key']][0]
+        image = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertGreater(image.shape[0], 9)
+        self.assertGreater(image.shape[1], 12)
+        self.assertLess(image.shape[0] * image.shape[1], 100_000)
+
+    def test_invalid_watermark_is_rejected_before_source_or_catalog_access(self):
+        request = dict(job_id='job', source={}, catalog_manifest={'pinned': True}, seed=5,
+                       parameters=dict(group_name='cats', insertion_format='crop', alpha_channel=0,
+                                       noise_level=0, result_size=16, cell_size=40))
+        for text in ('', 't.me/bot\nforged-line', 'кириллица', True, 'x' * 1000):
+            with self.subTest(text_type=type(text).__name__), patch.object(self.store, 'validate_reference') as validate:
+                request['watermark_text'] = text
+                with self.assertRaises(RenderRejected):
+                    ObjectRenderExecutor(self.store, MinioCatalogProvider(self.store)).execute(request, 'token')
+                validate.assert_not_called()
+                self.assertEqual(self.client.get_count, 0)
+
     def test_configured_result_filename_and_key_keep_jpeg_encoding_consistent(self):
         group = self.prepare_catalog()
         source = self.root / 'source.png'

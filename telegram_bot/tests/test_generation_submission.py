@@ -32,12 +32,15 @@ class TestGenerationSubmission(unittest.IsolatedAsyncioTestCase):
         )
 
         async def prepare(request, *, job_id, client_context):
-            return make_submission({
+            envelope = {
                 'job_id': job_id, 'source': request.source,
-                'parameters': request.model_dump(exclude={'source'}),
+                'parameters': request.model_dump(exclude={'source', 'watermark_text'}),
                 'catalog_manifest': submission('template')['request']['catalog_manifest'],
                 'seed': 123, 'client_id': 'telegram', 'client_context': client_context,
-            })
+            }
+            if request.watermark_text is not None:
+                envelope['watermark_text'] = request.watermark_text
+            return make_submission(envelope)
 
         self.gateway = SimpleNamespace(
             get_job=AsyncMock(return_value=None), count_user_jobs_between=AsyncMock(return_value=0),

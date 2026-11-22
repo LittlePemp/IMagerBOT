@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from copy import deepcopy
 
 from imager_config.loader import config
-from imager_contracts import GenerationParameters
+from imager_contracts import GenerationParameters, validate_watermark_text
 from src.infrastructure.data.errors import AccessDenied, DailyQuotaExceeded
 from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
 from src.models.generation_history import generation_history_record_id
@@ -27,10 +27,11 @@ def validate_output(result_size, cell_size):
 
 
 class SubmitGeneration:
-    def __init__(self, repositories, gateway, gate, *, fixed_admin_ids=()):
+    def __init__(self, repositories, gateway, gate, *, fixed_admin_ids=(), watermark_text=None):
         self.repositories, self.gateway, self.gate = repositories, gateway, gate
         self.admissions = repositories.admission_repository
         self.fixed_admin_ids = frozenset(fixed_admin_ids)
+        self.watermark_text = validate_watermark_text(watermark_text)
 
     async def previous_settings(self, actor_id):
         """Reuse values, never an earlier image, seed, command or mutable preset."""
@@ -120,6 +121,7 @@ class SubmitGeneration:
             await self._policy(actor_id, draft)
             request = GenerateImageRequest(
                 source=source, group_name=draft['image_group'],
+                watermark_text=self.watermark_text,
                 result_size=draft['image_size'], noise_level=draft['noise_level'],
                 cell_size=draft['inset_size'],
                 insertion_format=draft.get('insertion_format', config.generation.insertion_format),

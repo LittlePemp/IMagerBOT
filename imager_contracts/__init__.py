@@ -12,6 +12,7 @@ from .protocol import (
     BINARY_CONTENT_TYPE, BUCKET_PATTERN, CLIENT_ID_PATTERN, CONTENT_TYPE_MAX_LENGTH,
     CONTEXT_MAX_BYTES, GROUP_NAME_MAX_LENGTH, INSERTION_FORMATS, JOB_ID_PATTERN,
     OBJECT_KEY_MAX_LENGTH, PERCENT_MAX, SCHEMA_VERSION, SEED_UPPER_BOUND, SHA256_PATTERN,
+    WATERMARK_TEXT_MAX_LENGTH,
 )
 
 
@@ -19,6 +20,16 @@ def _generation_default(name):
     # Wire definitions remain importable without configuration/filesystem I/O.
     from imager_config.loader import config
     return getattr(config.generation, name)
+
+
+def validate_watermark_text(value):
+    """Optional generic branding, independent of a transport or URL service."""
+    if value is None:
+        return None
+    if (not isinstance(value, str) or not 0 < len(value) <= WATERMARK_TEXT_MAX_LENGTH
+            or not value.isascii() or not value.isprintable() or value.isspace()):
+        raise ValueError('Watermark must be bounded, nonempty, single-line printable ASCII text')
+    return value
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,7 @@ class JobRequest:
     client_id: str = 'telegram'
     client_context: dict = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
+    watermark_text: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.job_id, str) or not re.fullmatch(JOB_ID_PATTERN, self.job_id):
@@ -113,6 +125,7 @@ class JobRequest:
             raise ValueError('Invalid client context')
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError('Unsupported job schema version')
+        validate_watermark_text(self.watermark_text)
 
     @classmethod
     def from_dict(cls, value):
@@ -131,11 +144,18 @@ class JobRequest:
             raise ValueError(f'Invalid job request: {error}') from error
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        # Preserve the exact canonical representation of already accepted jobs.
+        # Adding a null field would otherwise invalidate their stored hashes.
+        if self.watermark_text is None:
+            result.pop('watermark_text')
+        return result
 
 
 def payload_fingerprint(request):
     value = request.to_dict() if isinstance(request, JobRequest) else request
+    if isinstance(value, dict) and value.get('watermark_text') is None:
+        value = {key: item for key, item in value.items() if key != 'watermark_text'}
     encoded = json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 

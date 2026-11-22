@@ -127,7 +127,7 @@ class ImagerService:
         )
         if not group or not group.get('manifest') or not group.get('count', 0):
             raise ValueError('Выбранная библиотека отсутствует или пуста. Обновите список групп.')
-        parameters = request.model_dump(exclude={'source'})
+        parameters = request.model_dump(exclude={'source', 'watermark_text'})
         envelope = {
             'job_id': job_id,
             'source': request.source,
@@ -137,6 +137,8 @@ class ImagerService:
             'client_id': 'telegram',
             'client_context': dict(client_context),
         }
+        if request.watermark_text is not None:
+            envelope['watermark_text'] = request.watermark_text
         document = make_submission(envelope)
         document['dispatch']['workflow_id'] = f'{runtime_config.temporal.workflow_id_prefix}{job_id}'
         return document

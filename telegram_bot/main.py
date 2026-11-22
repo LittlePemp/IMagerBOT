@@ -21,6 +21,7 @@ from imager_config.loader import config
 from settings import settings
 from src.application.admission import AdmissionDispatcher
 from src.application.admin_generation_notifications import AdminGenerationNotifications
+from src.application.bot_identity import bot_watermark_text
 from src.application.generation import SubmitGeneration
 from src.application.generation_progress import GenerationProgress
 from src.application.generation_result_menu import GenerationResultMenu
@@ -53,7 +54,7 @@ class SharedClientStorage(PyMongoStorage):
         pass
 
 
-def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None):
+def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None, watermark_text=None):
     gate = upload_gate or UploadGate()
     # Register FSM after the cheap abuse gate, before database-backed actor/UI.
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
@@ -61,7 +62,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     dp['user_repository'] = repositories.user_repository
     dp['catalog_import_service'] = CatalogImportService(gateway, upload_gate=gate)
     dp['generation_service'] = SubmitGeneration(
-        repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids,
+        repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids, watermark_text=watermark_text,
     )
     dp['generation_progress'] = progress
     dp.update.outer_middleware(ErrorBoundaryMiddleware())
@@ -128,9 +129,11 @@ async def main():
             repositories.generation_progress_repository, repositories.admission_repository,
             imager_service, bot,
         )
+        # aiogram caches getMe; polling reuses the same verified identity.
+        watermark_text = bot_watermark_text(await bot.me())
         dispatcher = create_dispatcher(repositories, imager_service, upload_gate=gate, storage=SharedClientStorage(
             client, db_name=settings.database_name, collection_name=config.mongo.bot_fsm_collection,
-        ), progress=progress)
+        ), progress=progress, watermark_text=watermark_text)
         imports = dispatcher['catalog_import_service']
         await imports.ensure_indexes()
         result_menu = GenerationResultMenu(

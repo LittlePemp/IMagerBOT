@@ -118,6 +118,7 @@ def _validate(config):
         'limits.original_cache_bytes', 'limits.prepared_cache_bytes',
         'storage.retry_attempts', 'storage.retry_backoff_seconds', 'legacy.rabbitmq_max_retries',
         'temporal.worker.cached_workflows', 'logging.retained_archives',
+        'watermark.background_opacity',
     }
 
     def numbers(model, path=''):
@@ -170,6 +171,23 @@ def _validate(config):
         raise ConfigurationError('image.allowed_color_modes must be a nonempty set of modes')
     if not 1 <= config.render.jpeg_quality <= PERCENT_MAX:
         raise ConfigurationError('render.jpeg_quality must fit the JPEG codec range')
+    watermark = config.watermark
+    if not (0 < watermark.font_height_fraction <= 1
+            and 0 < watermark.preferred_width_fraction <= 1
+            and 0 < watermark.margin_fraction < 0.5
+            and 0 < watermark.stroke_fraction <= 1
+            and 0 <= watermark.background_opacity <= 1):
+        raise ConfigurationError('Watermark fractions are outside their supported ranges')
+    if not watermark.min_font_height_pixels <= watermark.max_font_height_pixels <= limits.decoder_height:
+        raise ConfigurationError('Watermark font height bounds are inverted or excessive')
+    if not (watermark.outline_pixels <= watermark.padding_pixels <= watermark.min_font_height_pixels
+            and watermark.min_margin_pixels <= watermark.max_font_height_pixels):
+        raise ConfigurationError('Watermark padding, outline or margin is excessive')
+    for color in (watermark.foreground_bgr, watermark.background_bgr):
+        if len(color) != COLOR_CHANNELS or any(not 0 <= channel <= 255 for channel in color):
+            raise ConfigurationError('Watermark colors must contain three byte-valued BGR channels')
+    if watermark.foreground_bgr == watermark.background_bgr:
+        raise ConfigurationError('Watermark foreground and background must contrast')
     if config.render.output_extension not in OUTPUT_EXTENSIONS:
         raise ConfigurationError('render.output_extension is not a supported encoder format')
     _basename(config.render.output_stem, 'render.output_stem')
