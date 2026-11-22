@@ -152,6 +152,7 @@ def prepare(project_root=ROOT, data_root=None, ui_user=None, ui_password=None, r
         'MINIO_CONSOLE_PORT': values.get('MINIO_CONSOLE_PORT') or str(
             production_config.minio_console_port if production else config.deployment.minio_console_port),
         'API_TOKEN': values.get('API_TOKEN') or existing_bot.get('API_TOKEN', existing_bot.get('api_token', '')),
+        'SUPPORT_BOT_TOKEN': values.get('SUPPORT_BOT_TOKEN') or existing_bot.get('SUPPORT_BOT_TOKEN', existing_bot.get('support_bot_token', '')),
         'TELEGRAM_ADMIN_IDS': values.get('TELEGRAM_ADMIN_IDS') or existing_bot.get('TELEGRAM_ADMIN_IDS', existing_bot.get('telegram_admin_ids', '')),
         # Telegram application credentials are supplied by the operator. They
         # cannot be randomly generated like Mongo/MinIO passwords.

@@ -40,6 +40,11 @@ from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.notifier import GenerationNotifier
 from src.infrastructure.services.catalog_import_service import CatalogImportService
 from src.models.user import User, UserStatus
+from src.support.config import support_config
+from src.support.handlers import create_support_dispatcher, register_main_support_reply_guard
+from src.support.polling import poll_dispatchers
+from src.support.repository import SupportRepository
+from src.support.service import SupportService
 from src.utils.loggers import exception_logger
 from src.utils.middlewares import logging_middleware
 from src.utils.middlewares.abuse_control import AbuseControlMiddleware, UploadGate
@@ -54,7 +59,8 @@ class SharedClientStorage(PyMongoStorage):
         pass
 
 
-def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None, watermark_text=None):
+def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, progress=None,
+                      watermark_text=None, support_bot_url=None, support_service=None):
     gate = upload_gate or UploadGate()
     # Register FSM after the cheap abuse gate, before database-backed actor/UI.
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
@@ -65,6 +71,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
         repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids, watermark_text=watermark_text,
     )
     dp['generation_progress'] = progress
+    dp['support_bot_url'] = support_bot_url
     dp.update.outer_middleware(ErrorBoundaryMiddleware())
     dp.update.outer_middleware(AbuseControlMiddleware())
     dp.update.outer_middleware(dp.fsm)
@@ -72,6 +79,8 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(AuthenticationMiddleware(repositories.user_repository))
     dp.callback_query.outer_middleware(NavigationMiddleware())
+    if support_service is not None:
+        register_main_support_reply_guard(dp, support_service)
     dp.message.outer_middleware(ConversationRecoveryMiddleware())
     register_handlers_main_menu(dp)
     register_pack_import_command(dp)
@@ -114,6 +123,7 @@ async def main():
         waitQueueTimeoutMS=config.mongo.wait_queue_timeout_ms,
     )
     stop, tasks = asyncio.Event(), []
+    support_bot = support_dispatcher = support_service = None
     try:
         repositories = get_uow(client[settings.database_name])
         await preserve_conversations(client[settings.database_name][config.mongo.bot_fsm_collection])
@@ -131,9 +141,30 @@ async def main():
         )
         # aiogram caches getMe; polling reuses the same verified identity.
         watermark_text = bot_watermark_text(await bot.me())
+        support_bot_url = None
+        if settings.support_bot_token is not None:
+            # Support forwards Telegram media without downloading it. Its own
+            # cloud session does not add a second Local Bot API file cache.
+            support_bot = Bot(
+                token=settings.support_bot_token.get_secret_value(),
+                session=AiohttpSession(timeout=config.bot.api_timeout_seconds),
+            )
+            if support_bot.id == bot.id:
+                raise ValueError('Support must use a separate Telegram bot identity')
+            support_bot_url = 'https://' + bot_watermark_text(await support_bot.me())
+            support_repository = SupportRepository(
+                repositories.db[support_config.collection], bot_id=support_bot.id,
+            )
+            await support_repository.ensure_indexes()
+            support_service = SupportService(
+                support_repository, repositories.user_repository, bot, support_bot, support_bot_url,
+                fixed_admin_ids=settings.telegram_admin_ids,
+            )
+            support_dispatcher = create_support_dispatcher(repositories.user_repository, support_service)
         dispatcher = create_dispatcher(repositories, imager_service, upload_gate=gate, storage=SharedClientStorage(
             client, db_name=settings.database_name, collection_name=config.mongo.bot_fsm_collection,
-        ), progress=progress, watermark_text=watermark_text)
+        ), progress=progress, watermark_text=watermark_text,
+            support_bot_url=support_bot_url, support_service=support_service)
         imports = dispatcher['catalog_import_service']
         await imports.ensure_indexes()
         result_menu = GenerationResultMenu(
@@ -153,10 +184,12 @@ async def main():
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
                  asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop)),
                  asyncio.create_task(admin_notifications.run(stop))]
+        if support_service is not None:
+            tasks.append(asyncio.create_task(support_service.run(stop)))
+            await support_bot.delete_webhook(drop_pending_updates=False)
         await bot.delete_webhook(drop_pending_updates=False)
-        await dispatcher.start_polling(
-            bot, close_bot_session=False, allowed_updates=['message', 'callback_query'],
-            tasks_concurrency_limit=config.bot.max_concurrent_updates,
+        await poll_dispatchers(
+            dispatcher, bot, support_dispatcher=support_dispatcher, support_bot=support_bot,
         )
     finally:
         stop.set()
@@ -175,8 +208,12 @@ async def main():
                 try:
                     await client.close()
                 finally:
-                    await bot.session.close()
-                    await logger.complete()
+                    try:
+                        await bot.session.close()
+                    finally:
+                        if support_bot is not None:
+                            await support_bot.session.close()
+                        await logger.complete()
 
 
 if __name__ == '__main__':

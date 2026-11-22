@@ -11,13 +11,16 @@ from imager_config.loader import config
 
 class Settings(BaseSettings):
     api_token: SecretStr
+    support_bot_token: SecretStr | None = None
     telegram_api_base_url: str = config.bot.api_base_url
     telegram_api_local: bool = config.bot.api_local
     mongodb_uri: str
     rabbitmq_url: str = config.legacy.rabbitmq_url
     rabbitmq_requests_queue: str = config.legacy.rabbitmq_requests_queue
     telegram_admin_ids: Annotated[tuple[int, ...], NoDecode]
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(
+        env_file='.env', env_file_encoding='utf-8', extra='ignore', hide_input_in_errors=True,
+    )
     database_name: str = config.mongo.bot_database
     imager_database_name: str = config.mongo.core_database
     minio_endpoint: str = config.storage.endpoint
@@ -45,6 +48,20 @@ class Settings(BaseSettings):
     telegram_max_document_size_bytes: int = config.render.max_output_bytes
     generation_estimated_jpeg_bytes_per_pixel: float = config.render.estimated_jpeg_bytes_per_pixel
     regular_user_upload_limit: int = config.bot.regular_user_upload_limit
+
+    @field_validator('support_bot_token', mode='before')
+    @classmethod
+    def optional_support_token(cls, value):
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
+
+    @model_validator(mode='after')
+    def validate_separate_support_identity(self):
+        if (self.support_bot_token is not None
+                and self.support_bot_token.get_secret_value() == self.api_token.get_secret_value()):
+            raise ValueError('Support must use a different bot token')
+        return self
 
     @field_validator('telegram_admin_ids', mode='before')
     @classmethod

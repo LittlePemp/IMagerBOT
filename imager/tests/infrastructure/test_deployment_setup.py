@@ -116,6 +116,21 @@ class TestDeploymentSetup(unittest.TestCase):
             self.assertIn("MONGO_PASSWORD='abc$literal-secret'", text)
             self.assertEqual(setup.parse_env(root / 'infra/.env')['MONGO_PASSWORD'], 'abc$literal-secret')
 
+    def test_support_bot_token_is_preserved_when_setup_runs_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = setup.prepare(root, root / 'runtime')
+            values = setup.parse_env(result['env'])
+            values['SUPPORT_BOT_TOKEN'] = 'offline-support-token'
+            result['env'].write_text('\n'.join(
+                f'{name}={setup.dotenv_literal(value)}' for name, value in values.items()
+            ) + '\n', encoding='utf-8')
+            setup.prepare(root, root / 'runtime')
+            self.assertEqual(setup.parse_env(result['env'])['SUPPORT_BOT_TOKEN'], 'offline-support-token')
+            for filename in ('docker-compose.prod.yaml', 'docker-compose.dev.yaml'):
+                compose = (SETUP.parent / filename).read_text(encoding='utf-8')
+                self.assertIn('SUPPORT_BOT_TOKEN: ${SUPPORT_BOT_TOKEN:-}', compose)
+
     def test_weak_ui_password_is_not_written(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -55,6 +55,28 @@ class UserMenuTests(TelegramFixture):
         await dp.feed_update(self.bot, Update(update_id=3, callback_query=self.callback(home.callback_data, message_id=message_id)))
         self.assertEqual(self.last_view().text, 'Главное меню')
 
+    async def test_support_links_to_the_second_bot_and_preserves_home_navigation(self):
+        dp = self.dispatcher()
+        dp['support_bot_url'] = 'https://t.me/SupportFixtureBot'
+        menu = await self.open_menu(dp)
+        support = next(button for row in menu.reply_markup.inline_keyboard for button in row
+                       if button.text == 'Поддержка')
+        message_id = self.session.next_message
+        await dp.feed_update(self.bot, Update(update_id=2, callback_query=self.callback(
+            support.callback_data, message_id=message_id,
+        )))
+        view = self.last_view()
+        buttons = [button for row in view.reply_markup.inline_keyboard for button in row]
+        self.assertEqual([button.text for button in buttons], ['Написать в поддержку', 'Главное меню'])
+        self.assertEqual(buttons[0].url, 'https://t.me/SupportFixtureBot')
+        self.assertIsNone(buttons[0].callback_data)
+        self.assertIn('фото или файл', view.text)
+        self.assertTrue(buttons[1].callback_data.startswith('n:'))
+        await dp.feed_update(self.bot, Update(update_id=3, callback_query=self.callback(
+            buttons[1].callback_data, message_id=message_id,
+        )))
+        self.assertEqual(self.last_view().text, 'Главное меню')
+
     async def test_retired_callbacks_cannot_show_status_or_restart_delivery(self):
         dp = self.dispatcher()
         for index, action in enumerate(('my_image', 'job_status:private-id', 'job_retry:private-id'), 1):

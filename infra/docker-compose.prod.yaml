@@ -385,6 +385,7 @@ services:
     init: true
     environment:
       API_TOKEN: ${API_TOKEN:-}
+      SUPPORT_BOT_TOKEN: ${SUPPORT_BOT_TOKEN:-}
       TELEGRAM_ADMIN_IDS: ${TELEGRAM_ADMIN_IDS:-}
       TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
       TELEGRAM_API_LOCAL: 'true'
