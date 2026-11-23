@@ -14,7 +14,7 @@ from src.utils.navigation import NavigationCallback, bind_view, new_view_token, 
 HOME_ACTION_INDEX = -1
 RECORD_ACTIONS = frozenset({
     'grant', 'revoke', 'ban', 'unban', 'preset_remove', 'group_show',
-    'group_enable', 'group_disable', 'group_rename',
+    'group_enable', 'group_disable', 'group_rename', 'upload_show',
 })
 
 

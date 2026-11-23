@@ -28,6 +28,7 @@ from src.application.generation_result_menu import GenerationResultMenu
 from src.application.catalog_projection import CatalogImportProjection
 from src.commands.about.about_handler import register_handlers_about
 from src.commands.admin_panel.admin_panel_handler import register_handlers_admin_panel
+from src.commands.admin_panel.recent_uploads import register_handlers_recent_uploads
 from src.commands.admin_panel.user_management import register_handlers_user_management_total
 from src.commands.admin_panel.image_build_params.image_build_params_handler import register_handlers_image_build_params
 from src.commands.image_generation.image_generation_handler import register_handlers_image_generation
@@ -66,6 +67,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     dp = Dispatcher(storage=storage, events_isolation=SimpleEventIsolation(), disable_fsm=True)
     dp['uow'] = repositories
     dp['user_repository'] = repositories.user_repository
+    dp['recent_uploads_gateway'] = gateway
     dp['catalog_import_service'] = CatalogImportService(gateway, upload_gate=gate)
     dp['generation_service'] = SubmitGeneration(
         repositories, gateway, gate, fixed_admin_ids=settings.telegram_admin_ids, watermark_text=watermark_text,
@@ -85,6 +87,7 @@ def create_dispatcher(repositories, gateway, *, storage=None, upload_gate=None, 
     register_handlers_about(dp)
     register_handlers_support(dp)
     register_handlers_admin_panel(dp)
+    register_handlers_recent_uploads(dp)
     register_handlers_user_management_total(dp)
     register_handlers_image_build_params(dp, repositories)
     register_handlers_pack_import(dp, with_command=False)

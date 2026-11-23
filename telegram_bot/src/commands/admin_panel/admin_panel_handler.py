@@ -11,6 +11,7 @@ async def show_admin_menu(event, state):
     await show(event, state, 'Админ-панель', [
         ('Пользователи', 'users', 0),
         ('Параметры сборки изображения', 'params', 0),
+        ('Последние 10 фото', 'uploads', 0),
     ])
 
 

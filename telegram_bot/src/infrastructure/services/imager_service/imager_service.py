@@ -5,14 +5,15 @@ Mongo holds immutable command/outbox envelopes; the core dispatcher starts Tempo
 """
 import asyncio
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from imager_contracts import JobRequest, make_submission, payload_fingerprint
-from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, JPEG_CONTENT_TYPE, SCHEMA_VERSION
+from imager_contracts import JobRequest, ObjectRef, make_submission, payload_fingerprint
+from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, JPEG_CONTENT_TYPE, JOB_ID_PATTERN, SCHEMA_VERSION
 from imager_config.loader import config as runtime_config
 from src.infrastructure.services.object_storage import BotObjectStorage
 from src.utils.loggers import service_logger
@@ -84,6 +85,76 @@ class ImagerService:
             {'request.client_id': 'telegram', 'request.client_context.user_id': actor_id},
             sort=[('created_at', -1)],
         )
+
+    async def recent_uploads(self, limit=10) -> list[dict]:
+        """Read a bounded Telegram-source gallery from the core job records."""
+        if type(limit) is not int:
+            raise ValueError('Recent upload limit must be an integer')
+        if limit <= 0:
+            # Mongo's limit(0) removes the bound instead of returning no rows.
+            return []
+        limit = min(limit, 10)
+        return await asyncio.to_thread(lambda: list(self.jobs.find(
+            {
+                'request.client_id': 'telegram',
+                'request.source': {'$exists': True, '$ne': None},
+                'artifact_lifecycle.source.state': {
+                    '$nin': ['deleted', 'deleting', 'unmanaged'],
+                },
+            },
+            {
+                '_id': 1, 'created_at': 1, 'request.source': 1,
+                'request.client_context': 1, 'request.parameters': 1,
+                'artifact_lifecycle.source': 1,
+            },
+        ).sort([('created_at', -1), ('_id', -1)]).limit(limit)))
+
+    async def download_source(self, job_id, path):
+        """Recheck ownership/retention before a bounded, verified source download."""
+        if not isinstance(job_id, str) or not re.fullmatch(JOB_ID_PATTERN, job_id):
+            raise ValueError('Invalid job identifier')
+        document = await self.get_job(job_id)
+        if not isinstance(document, dict) or document.get('_id') != job_id:
+            raise ValueError('Source job was not found')
+        request = document.get('request')
+        if not isinstance(request, dict) or request.get('client_id') != 'telegram':
+            raise ValueError('Source job does not belong to Telegram')
+        lifecycle = document.get('artifact_lifecycle') or {}
+        if not isinstance(lifecycle, dict):
+            raise ValueError('Invalid source artifact lifecycle')
+        source_lifecycle = lifecycle.get('source') or {}
+        if not isinstance(source_lifecycle, dict):
+            raise ValueError('Invalid source artifact lifecycle')
+        if source_lifecycle.get('state') in ('deleted', 'deleting', 'unmanaged'):
+            raise ValueError('Source artifact is no longer available')
+        reference = ObjectRef.from_dict(request.get('source')).to_dict()
+        key = reference['key']
+        # Keep the same ownership boundary as the core's source retention policy.
+        protected = ['catalog/'] + [template.split('{', 1)[0] for template in (
+            runtime_config.storage.catalog_image_key_template,
+            runtime_config.storage.catalog_manifest_key_template,
+            runtime_config.pack_import.archive_key_template,
+        )]
+        if any(not prefix or key.startswith(prefix) for prefix in protected):
+            raise ValueError('Source points into a catalog/import namespace')
+        expected = runtime_config.storage.source_key_template.format(
+            job_id=job_id, sha256=reference['sha256'],
+        )
+        legacy = {f'uploads/{job_id}/{filename}' for filename in (
+            runtime_config.storage.source_filename,
+            runtime_config.storage.upload_filename,
+        )}
+        if key != expected and key not in legacy:
+            raise ValueError('Source artifact is not owned by this job')
+        max_bytes = runtime_config.limits.source_file_bytes
+        if not 0 < reference['size_bytes'] <= max_bytes:
+            raise ValueError('Source file exceeds the configured size limit')
+        if reference['bucket'] != self.object_store.bucket:
+            raise ValueError('Source uses a different object bucket')
+        await asyncio.to_thread(
+            self.object_store.download_result, reference, path, max_bytes=max_bytes,
+        )
+        return str(path)
 
     async def active_queue(self, *, pending_ids=()):
         query = {'status': {'$in': ['queued', 'running', 'retrying']}}

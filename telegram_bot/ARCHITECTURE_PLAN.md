@@ -100,6 +100,7 @@ Telegram и Mongo не участвуют в общей транзакции. О
 - `application/generation.py`: проверка политики и SubmitGeneration.
 - `application/admission.py`: повторная публикация долговечного допуска.
 - `commands/admin_panel/ui.py`: короткие типизированные административные команды и серверные snapshots.
+- `commands/admin_panel/recent_uploads.py`: просмотр последних десяти принятых исходников через `/admin`, только в личном чате администратора. Список читается из core jobs, исходник повторно проверяется и скачивается из MinIO с ограничением размера и проверкой checksum. Каждый явный выбор показывает одно фото; последующие выборы редактируют тот же preview. Публичные URL, альбомы, фоновые отправки и автоматические повторы не используются.
 - `utils/navigation.py`: владелец, текущий экран, token, срок действия.
 - `utils/middlewares/abuse_control.py`: ограничения событий и загрузок.
 - `infrastructure/data/repositories/admission_repository.py`: дневная квота и атомарный outbox.
