@@ -9,7 +9,7 @@ from .common_params_states import CommonParamsStates
 
 
 PARAM_TYPES = (ParamType.IMAGE_SIZE, ParamType.NOISE_LEVEL, ParamType.INSET_SIZE)
-PARAM_NAMES = ('Размер результата', 'Уровень шума', 'Размер ячейки')
+PARAM_NAMES = ('Качество', 'Уровень шума', 'Размер ячейки')
 
 
 async def render_presets(event, state, uow, type_index, page=0):

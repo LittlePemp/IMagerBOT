@@ -12,7 +12,7 @@ from src.utils.navigation import render_view
 from .image_generation_states import ImageGenerationStates as S
 
 STEPS = (
-    (ParamType.IMAGE_SIZE, 'image_size', S.selecting_image_size, S.waiting_manual_image_size, 'Размер результата'),
+    (ParamType.IMAGE_SIZE, 'image_size', S.selecting_image_size, S.waiting_manual_image_size, 'Качество'),
     (ParamType.NOISE_LEVEL, 'noise_level', S.selecting_noise_level, S.waiting_manual_noise_level, 'Уровень шума'),
     (ParamType.INSET_SIZE, 'inset_size', S.selecting_inset_size, S.waiting_manual_inset_size, 'Размер ячейки'),
 )
@@ -167,7 +167,7 @@ async def choose_group(callback, state, uow):
     await state.update_data(image_group=name)
     await state.set_state(S.waiting_for_image_upload)
     await render_view(callback, state,
-        f"Размер: {data['image_size']}; шум: {data['noise_level']}; ячейка: {data['inset_size']}.\n"
+        f"Качество: {data['image_size']}; шум: {data['noise_level']}; ячейка: {data['inset_size']}.\n"
         f'Библиотека: {group.display_name}.\nОтправьте фото или стикер Telegram.\n'
         'Для анимированных и видеостикеров используется превью.', keyboard([('Назад', 'back')]))
     await callback.answer()

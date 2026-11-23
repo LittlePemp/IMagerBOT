@@ -19,11 +19,11 @@ def validate_output(result_size, cell_size):
     if (type(result_size) is not int or type(cell_size) is not int
             or not 0 < result_size <= config.limits.result_size
             or not 0 < cell_size <= config.limits.cell_size):
-        raise ValueError('Размер результата или ячейки выходит за допустимые пределы.')
+        raise ValueError('Качество или размер ячейки выходит за допустимые пределы.')
     pixels = (result_size * cell_size) ** 2
     if (result_size ** 2 > config.limits.cells or pixels > config.limits.output_pixels
             or pixels * config.render.estimated_jpeg_bytes_per_pixel > config.render.max_output_bytes):
-        raise ValueError('Слишком большое изображение. Уменьшите размер результата или ячейки.')
+        raise ValueError('Слишком большое изображение. Уменьшите качество или размер ячейки.')
 
 
 class SubmitGeneration:

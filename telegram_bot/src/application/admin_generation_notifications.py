@@ -34,7 +34,7 @@ def generation_notice_text(notice, actor, group):
         '👀 Изображение принято в очередь\n'
         f"От: {name}\nTelegram ID: {notice['actor_id']}\n"
         f'Пак: {pack}\n'
-        f"Размер: {parameters['result_size']} ячеек\n"
+        f"Качество: {parameters['result_size']} ячеек\n"
         f"Ячейка: {parameters['cell_size']} пикс.; шум: {parameters['noise_level']}"
     )
 

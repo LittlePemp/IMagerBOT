@@ -10,7 +10,7 @@ from .image_groups.image_groups_handler import register_handlers_image_groups
 
 async def render_parameters(event, state):
     await show(event, state, 'Выберите параметр для настройки:', [
-        ('Размер результата', 'preset_list', 0),
+        ('Качество', 'preset_list', 0),
         ('Уровень шума', 'preset_list', 1),
         ('Размер ячейки', 'preset_list', 2),
         ('Библиотеки изображений', 'groups', 0),
