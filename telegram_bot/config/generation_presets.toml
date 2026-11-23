@@ -1,6 +1,9 @@
 # Initial editable Mongo presets. Seeding changes these names only.
 recommended = "Средний"
 
+[button_labels]
+"Большой" = "Большой (реком.)"
+
 [[profiles]]
 name = "Максимальный"
 image_size = 128

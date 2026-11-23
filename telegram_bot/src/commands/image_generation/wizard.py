@@ -5,7 +5,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from imager_config.loader import config
 from src.application.generation import validate_output
-from src.application.generation_presets import list_generation_profiles, load_profile_defaults
+from src.application.generation_presets import (
+    list_generation_profiles, load_profile_button_labels, load_profile_defaults,
+)
 from src.commands.common_keyboards import home_keyboard
 from src.models.image_build_params import CommonParam, ParamType
 from src.utils.navigation import render_view
@@ -31,7 +33,7 @@ async def start(event, state, prompt='Выберите способ ввода �
     await state.clear()
     await state.set_state(S.choosing_generation_mode)
     await render_view(event, state, prompt, keyboard([
-        ('Из пресетов (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
+        ('Качество (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
     ]))
 
 
@@ -48,9 +50,10 @@ async def choose_mode(callback, state, uow):
 
 async def show_presets(event, state, uow, step, page=0):
     values = await list_generation_profiles(uow.image_build_params_repository)
+    labels = load_profile_button_labels()
     page = max(0, min(page, max(0, (len(values) - 1) // config.bot.ui_page_size)))
     start_index = page * config.bot.ui_page_size
-    buttons = [(item['name'], f'pick:{index}')
+    buttons = [(labels.get(item['name'], item['name']), f'pick:{index}')
                for index, item in enumerate(values) if start_index <= index < start_index + config.bot.ui_page_size]
     if page:
         buttons.append(('← Предыдущая', f'preset_page:0:{page - 1}'))
@@ -63,7 +66,7 @@ async def show_presets(event, state, uow, step, page=0):
     })
     await state.set_state(S.selecting_image_size)
     await render_view(event, state,
-        'Выберите пресет:' if values else 'Пока нет доступных пресетов.',
+        'Выберите качество:' if values else 'Пока нет доступных вариантов качества.',
         keyboard(buttons))
 
 

@@ -11,6 +11,16 @@ PROFILE_TYPES = (ParamType.IMAGE_SIZE, ParamType.NOISE_LEVEL, ParamType.INSET_SI
 DEFAULT_PROFILE_PATH = Path(__file__).resolve().parents[2] / 'config' / 'generation_presets.toml'
 
 
+def load_profile_button_labels(path=DEFAULT_PROFILE_PATH):
+    """Display labels never change editable profile names or parameter values."""
+    with Path(path).open('rb') as stream:
+        labels = tomllib.load(stream).get('button_labels', {})
+    if not isinstance(labels, dict):
+        raise ValueError('Profile button labels must be a table')
+    return {validate_display_name(name): validate_display_name(label)
+            for name, label in labels.items()}
+
+
 def load_profile_defaults(path=DEFAULT_PROFILE_PATH):
     """Validate every seed value before the first database write."""
     with Path(path).open('rb') as stream:

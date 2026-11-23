@@ -101,7 +101,7 @@ class GenerationResultMenuTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(await self.state.get_state(), S.choosing_generation_mode.state)
         labels = [button.text for row in self.session.last[5].reply_markup.inline_keyboard for button in row]
-        self.assertIn('Из пресетов (реком.)', labels)
+        self.assertIn('Качество (реком.)', labels)
         self.assertIn('Вручную', labels)
         self.assertTrue(any(isinstance(request, EditMessageText) for request in self.session.requests))
         self.service.fail_completion.assert_not_awaited()
