@@ -208,7 +208,7 @@ class RepeatRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Библиотека больше недоступна', text)
         self.assertIn('Выберите настройки', text)
         labels = [button.text for row in self.session.last[3].reply_markup.inline_keyboard for button in row]
-        self.assertIn('Качество (реком.)', labels)
+        self.assertIn('Пресеты (реком.)', labels)
         self.watch.assert_not_awaited()
 
     async def test_invalid_settings_in_an_active_upload_form_also_return_to_setup(self):

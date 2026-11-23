@@ -114,7 +114,7 @@ class GenerationPresetWizardTests(TelegramFixture):
         await wizard.pick_preset(self.callback('pick:0'), self.state, self.uow)
         await wizard.back(self.callback('back'), self.state, self.uow)
         self.assertEqual(await self.state.get_state(), S.selecting_image_size.state)
-        self.assertIn('Выберите качество', self.last_view().text)
+        self.assertIn('Выберите пресет', self.last_view().text)
         await self.state.update_data(current_presets={'0': self.rows[0].model_dump(mode='json')})
         await wizard.pick_preset(self.callback('pick:0'), self.state, self.uow)
         self.assertIn('parameters', (await self.state.get_data())['current_presets']['0'])

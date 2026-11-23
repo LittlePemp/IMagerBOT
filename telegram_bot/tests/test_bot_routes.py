@@ -186,14 +186,14 @@ class BotRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_preset_generation_flow_reaches_photo_upload_with_resolved_values(self):
         await self.send(3, '/menu')
         await self.click(3, title='Собрать изображение')
-        await self.click(3, title='Качество (реком.)')
+        await self.click(3, title='Пресеты (реком.)')
         await self.click(3, title='Средний')
         self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_group.state)
         # Back from libraries returns to whole profiles, not a retired numeric
         # parameter step. Selecting a profile again resolves all three values.
         await self.click(3, title='Назад')
         self.assertEqual(await self.state(3).get_state(), GenerationStates.selecting_image_size.state)
-        self.assertIn('Выберите качество', self.session.last[3].text)
+        self.assertIn('Выберите пресет', self.session.last[3].text)
         await self.click(3, title='Средний')
         await self.click(3, title='Иконки')
         self.assertEqual(await self.state(3).get_state(), GenerationStates.waiting_for_image_upload.state)

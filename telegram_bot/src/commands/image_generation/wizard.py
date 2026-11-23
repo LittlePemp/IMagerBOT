@@ -33,7 +33,7 @@ async def start(event, state, prompt='Выберите способ ввода �
     await state.clear()
     await state.set_state(S.choosing_generation_mode)
     await render_view(event, state, prompt, keyboard([
-        ('Качество (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
+        ('Пресеты (реком.)', 'mode:presets'), ('Вручную', 'mode:manual'),
     ]))
 
 
@@ -66,7 +66,7 @@ async def show_presets(event, state, uow, step, page=0):
     })
     await state.set_state(S.selecting_image_size)
     await render_view(event, state,
-        'Выберите качество:' if values else 'Пока нет доступных вариантов качества.',
+        'Выберите пресет:' if values else 'Пока нет доступных пресетов.',
         keyboard(buttons))
 
 
