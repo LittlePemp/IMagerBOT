@@ -180,8 +180,9 @@ class ImagerService:
     async def count_user_jobs_between(self, actor_id, start, end):
         return await asyncio.to_thread(
             self.jobs.count_documents,
+            # Failed generations return their quota unit, so they never count.
             {'request.client_id': 'telegram', 'request.client_context.user_id': actor_id,
-             'created_at': {'$gte': start, '$lt': end}},
+             'created_at': {'$gte': start, '$lt': end}, 'status': {'$ne': 'failed'}},
         )
 
     async def upload_source(self, path, job_id, *, content_type=JPEG_CONTENT_TYPE):
@@ -190,6 +191,12 @@ class ImagerService:
         except Exception:
             service_logger.exception(f'Source upload failed: job_id={job_id}')
             raise
+
+    async def delete_source(self, job_id, key):
+        await asyncio.to_thread(self.object_store.delete_source, job_id, key)
+
+    async def list_sources(self):
+        return await asyncio.to_thread(lambda: list(self.object_store.list_sources()))
 
     async def prepare_submission(self, request, *, job_id, client_context):
         """Resolve the catalog and execution policy once, before durable admission."""

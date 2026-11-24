@@ -50,3 +50,26 @@ def create_render_executor():
         store, MinioCatalogProvider(store), jpeg_quality=settings.generated_image_jpeg_quality,
         max_output_bytes=settings.telegram_max_document_size_bytes,
     )
+
+
+def purge_core_scratch(root=None):
+    """Remove temporary directories a killed worker left in its scratch mount.
+
+    TemporaryDirectory cleanup does not run after OOM kills or SIGKILL, and the
+    scratch path is a bind mount that survives container restarts.
+    """
+    import tempfile
+    from imager_config.loader import config
+    from imager_contracts.scratch import purge_stale_entries
+    from src.shared_kernel.loggers import presentation_logger
+    storage = config.storage
+    prefixes = (storage.render_temp_prefix, storage.cell_temp_prefix, storage.manifest_temp_prefix,
+                storage.json_temp_prefix, config.pack_import.temp_prefix)
+    try:
+        removed = purge_stale_entries(root or tempfile.gettempdir(), prefixes, storage.scratch_max_age_seconds)
+    except OSError:
+        presentation_logger.exception('Cannot sweep worker scratch directory')
+        return 0
+    if removed:
+        presentation_logger.warning(f'Removed {removed} stale scratch entries left by a stopped worker')
+    return removed

@@ -202,6 +202,15 @@ class MongoImportRepository:
             raise LostCatalogImport('Исполнитель больше не владеет публикацией библиотеки.')
         return True
 
+    def record_report(self, import_id, token, report):
+        """Store the skipped-file report of the attempt that owns the import."""
+        result = self.collection.update_one(
+            {'_id': import_id, 'status': 'running', 'execution.token': token},
+            {'$set': {'report': report, 'updated_at': self.clock()}},
+        )
+        if result.matched_count != 1:
+            raise LostCatalogImport('Статус импорта изменён другим обработчиком.')
+
     def heartbeat_execution(self, import_id, token, progress=None):
         job = self._job(import_id)
         if self._canonical(job):

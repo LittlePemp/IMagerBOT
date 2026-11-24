@@ -44,6 +44,11 @@ class AdmissionRepository:
             ('admissions.state', 1), ('admissions.admin_notice.state', 1),
             ('admissions.admin_notice.next_attempt_at', 1),
         ])
+        # Daily buckets (and their frozen request copies) are not kept forever.
+        await self.collection.create_index(
+            'created_at', name='admission_bucket_ttl',
+            expireAfterSeconds=config.bot.admission_retention_days * 24 * 3600,
+        )
 
     @staticmethod
     def _now(now):
@@ -109,7 +114,7 @@ class AdmissionRepository:
         # Kept separately so revoking an administrator does not reset the
         # ordinary account's usage or lose accepted-but-not-published images.
         return await self.collection.count_documents({
-            'actor_id': actor_id, 'date': day, 'quota_exempt': True,
+            'actor_id': actor_id, 'date': day, 'quota_exempt': True, 'refunded': {'$ne': True},
         })
 
     def day_window(self, now=None):
@@ -217,6 +222,28 @@ class AdmissionRepository:
         if found:
             return self._matching_receipt(found, document)
         raise DailyQuotaExceeded(self.daily_limit, reset)
+
+    async def refund(self, job_id, now=None):
+        """Return the quota unit of a generation that failed in the core.
+
+        Idempotent: the entry is flagged in the same atomic update, so retries
+        and concurrent consumers can never return the unit twice. Exempt
+        (administrator) admissions own a one-entry bucket that stops counting.
+        """
+        moment = self._now(now)
+        ordinary = await self.collection.update_one(
+            {'quota_exempt': {'$ne': True}, 'used': {'$gt': 0},
+             'admissions': {'$elemMatch': {'job_id': job_id, 'refunded': {'$ne': True}}}},
+            {'$inc': {'used': -1},
+             '$set': {'admissions.$.refunded': True, 'admissions.$.refunded_at': moment}},
+        )
+        if ordinary.matched_count:
+            return True
+        exempt = await self.collection.update_one(
+            {'quota_exempt': True, 'refunded': {'$ne': True}, 'admissions.job_id': job_id},
+            {'$set': {'refunded': True, 'refunded_at': moment}},
+        )
+        return bool(exempt.matched_count)
 
     async def pending_count(self):
         cursor = await self.collection.aggregate([

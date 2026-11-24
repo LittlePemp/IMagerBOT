@@ -19,8 +19,10 @@ from src.utils.result_files import delivery_result_filename
 
 
 class GenerationNotifier:
-    def __init__(self, service, bot, history_repository, *, progress=None, on_result_delivered=None):
+    def __init__(self, service, bot, history_repository, *, progress=None, on_result_delivered=None,
+                 admissions=None):
         self.service = service
+        self.admissions = admissions
         self.bot = bot
         self.history_repository = history_repository
         self.progress = progress
@@ -149,6 +151,11 @@ class GenerationNotifier:
             history_id = context['history_record_id']
             if history_id != generation_history_record_id(job_id):
                 raise ValueError('Accepted job has an inconsistent history identity')
+            if job['status'] == 'failed' and self.admissions is not None:
+                # A failed generation must not consume the user's daily quota.
+                # Refund is idempotent; this projection retries until it succeeds.
+                if await self.admissions.refund(job_id):
+                    service_logger.info(f'Daily quota refunded for failed generation: job_id={job_id}')
             ensured = await self.history_repository.create_record(GenerationHistoryRecord.from_job(job))
             if ensured != history_id:
                 raise RuntimeError('Cannot restore generation history projection')

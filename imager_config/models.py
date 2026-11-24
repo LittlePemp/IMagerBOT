@@ -101,6 +101,7 @@ class RuntimeStorageConfig:
     result_temp_prefix: str
     local_result_temp_prefix: str
     rpc_temp_prefix: str
+    scratch_max_age_seconds: int
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,10 @@ class RuntimeRetentionConfig:
     batch_size: int
     scan_size: int
     lease_seconds: int
+    import_archive_grace_seconds: int
+    orphan_result_grace_seconds: int
+    job_document_days: int
+    hygiene_poll_seconds: float
 
 
 @dataclass(frozen=True)
@@ -258,6 +263,11 @@ class RuntimeBotConfig:
     notification_retry_after_grace_seconds: float
     api_base_url: str
     api_local: bool
+    telegram_cache_max_age_seconds: int
+    janitor_poll_seconds: float
+    orphan_source_grace_seconds: int
+    admission_retention_days: int
+    history_retention_days: int
 
 
 @dataclass(frozen=True)

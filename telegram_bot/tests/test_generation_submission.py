@@ -9,7 +9,7 @@ from dataclasses import replace
 from imager_contracts import make_submission
 from imager_config.loader import config
 from src.application.generation import SubmitGeneration
-from src.infrastructure.data.errors import AccessDenied, DailyQuotaExceeded
+from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
 from src.infrastructure.data.repositories.admission_repository import AdmissionRepository
 from src.models.image_build_params import CommonParam, ParamType
 from src.utils.middlewares.abuse_control import UploadGate
@@ -168,6 +168,40 @@ class TestGenerationSubmission(unittest.IsolatedAsyncioTestCase):
             await self.execute()
         self.assertEqual(await self.admissions.remaining(1), 5)
         self.gateway.prepare_submission.assert_not_awaited()
+
+    async def test_source_of_a_rejected_admission_is_removed_from_storage(self):
+        self.gateway.delete_source = AsyncMock()
+
+        async def load(job_id):
+            self.group.active = False
+            return submission(job_id)['request']['source']
+        self.loader.side_effect = load
+        with self.assertRaises(ValueError):
+            await self.execute()
+        self.gateway.delete_source.assert_awaited_once_with('job-1', 'uploads/job-1/source.jpg')
+
+    async def test_quota_refusal_after_transfer_removes_the_uploaded_source(self):
+        self.gateway.delete_source = AsyncMock()
+        self.admissions.accept_submission = AsyncMock(side_effect=DailyQuotaExceeded(5, None))
+        with self.assertRaises(DailyQuotaExceeded):
+            await self.execute()
+        self.gateway.delete_source.assert_awaited_once()
+
+    async def test_uncertain_admission_keeps_the_source(self):
+        self.gateway.delete_source = AsyncMock()
+        self.admissions.accept_submission = AsyncMock(side_effect=AdmissionUncertain('job-1'))
+        with self.assertRaises(AdmissionUncertain):
+            await self.execute()
+        self.gateway.delete_source.assert_not_awaited()
+
+    async def test_source_referenced_by_a_core_job_is_never_removed(self):
+        self.gateway.delete_source = AsyncMock()
+        self.gateway.prepare_submission.side_effect = ValueError('library disappeared')
+        # A replay already reached the core with the same deterministic key.
+        self.gateway.get_job.side_effect = [None, {'_id': 'job-1'}]
+        with self.assertRaises(ValueError):
+            await self.execute()
+        self.gateway.delete_source.assert_not_awaited()
 
     async def test_deleted_preset_does_not_become_an_unchecked_value(self):
         self.draft['selected_presets'] = {'image_size': {'name': 'old', 'value': 120}}

@@ -130,8 +130,23 @@ class TestCatalogImportExecutor(unittest.TestCase):
         self.assertEqual(self.catalogs.documents['pack_test']['count'], 0)
         self.assertTrue(all('path' not in item for item in self.progress))
 
-    def test_invalid_later_image_prevents_all_image_uploads_and_publication(self):
-        self.setup_import([('valid.png', png((1, 2, 3))), ('broken.png', b'not an image')])
+    def test_broken_image_is_skipped_reported_and_never_uploaded(self):
+        valid = png((1, 2, 3))
+        self.setup_import([('valid.png', valid), ('broken.png', b'not an image'), ('readme.txt', b'notes')])
+        claim = self.repository.claim_execution(self.request)
+        result = self.execute(claim)
+        self.repository.complete('import_1', claim['token'], result)
+        self.assertEqual(result['count'], 1)
+        uploaded = [data for key, data in self.store.objects.items() if not key.endswith('.json')]
+        self.assertEqual(uploaded, [valid])
+        job = self.repository.get('import_1')
+        self.assertEqual(job['status'], 'completed')
+        self.assertEqual(job['report']['skipped_files'], 2)
+        self.assertTrue(any(item.startswith('broken.png: ') for item in job['report']['samples']))
+        self.assertTrue(any(item.startswith('readme.txt: ') for item in job['report']['samples']))
+
+    def test_pack_of_only_broken_images_is_rejected_without_publication(self):
+        self.setup_import([('broken.png', b'not an image'), ('other.png', b'also broken')])
         claim = self.repository.claim_execution(self.request)
         with self.assertRaises(InvalidCatalogArchive) as error:
             self.execute(claim)

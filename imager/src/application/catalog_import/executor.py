@@ -10,6 +10,15 @@ from .archive import extract_catalog_archive
 from .errors import InvalidCatalogArchive
 
 
+def _original_name(sample, origins):
+    """Translate '00000007.png: reason' back to the archive member name."""
+    name, separator, reason = sample.partition(': ')
+    stem = name.split('.', 1)[0]
+    if separator and stem.isdigit() and int(stem) < len(origins):
+        return f'{origins[int(stem)][:120]}: {reason}'
+    return sample
+
+
 class CatalogImportExecutor:
     def __init__(self, store, repository):
         self.store, self.repository = store, repository
@@ -43,9 +52,18 @@ class CatalogImportExecutor:
             try:
                 report, manifest, sources = _local_group_plan(
                     request.group_name, images, self.store.bucket, progress=validated,
+                    skip_invalid=True,
                 )
             except (ValueError, OpenCVError) as error:
                 raise InvalidCatalogArchive(f'Некорректное изображение в ZIP: {error}') from error
+            # Stray or broken files were skipped; the administrator sees them.
+            self.repository.record_report(request.import_id, token, {
+                'skipped_files': extracted.get('skipped', 0) + report.get('invalid_files', 0),
+                'duplicate_files': report.get('duplicate_files', 0),
+                'samples': (extracted.get('skipped_samples', []) + [
+                    _original_name(sample, extracted.get('origins', [])) for sample in report.get('invalid_samples', [])
+                ])[:20],
+            })
             self.store.ensure_bucket()
             for index, (path, expected) in enumerate(sources):
                 progress({'phase': 'uploading', 'processed': index, 'total': len(sources)})

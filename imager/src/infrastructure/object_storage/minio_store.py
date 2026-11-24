@@ -214,6 +214,37 @@ class MinioObjectStore:
             if getattr(error, 'code', None) not in ('NoSuchKey', 'NoSuchObject', 'NotFound'):
                 raise ObjectStoreError(error) from error
 
+    def list_objects(self, prefix):
+        """Yield (key, last_modified) under one dedicated, non-empty prefix."""
+        if not isinstance(prefix, str) or not prefix or not prefix.endswith('/'):
+            raise ValueError('Listing requires a dedicated key prefix')
+        try:
+            for item in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
+                if not item.is_dir:
+                    yield item.object_name, item.last_modified
+        except Exception as error:
+            raise ObjectStoreError(error) from error
+
+    def reference_for_key(self, key):
+        """Build an immutable reference for an existing object, or None if absent.
+
+        Objects written by this application carry their SHA256 in metadata, so
+        ``delete_file`` can still verify exactly what it removes.
+        """
+        key = self._key(key)
+        try:
+            info = self.client.stat_object(self.bucket, key)
+        except Exception as error:
+            if getattr(error, 'code', None) in ('NoSuchKey', 'NoSuchObject', 'NotFound'):
+                return None
+            raise ObjectStoreError(error) from error
+        metadata = {str(name).lower(): str(value) for name, value in info.metadata.items()}
+        digest = metadata.get('x-amz-meta-sha256')
+        if not digest or not re.fullmatch(SHA256_PATTERN, digest) or not info.size:
+            return None
+        return dict(bucket=self.bucket, key=key, sha256=digest, size_bytes=int(info.size),
+                    content_type=info.content_type or BINARY_CONTENT_TYPE)
+
     def put_json(self, value, key):
         encoded = json.dumps(value, sort_keys=True, separators=(',', ':'),
                              ensure_ascii=False).encode('utf-8')

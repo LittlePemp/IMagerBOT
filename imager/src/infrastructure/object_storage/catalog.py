@@ -181,9 +181,23 @@ def _local_groups(directory, group_name):
     return groups
 
 
-def _local_group_plan(name, group_path, bucket, *, progress=None):
-    """Hash/validate a group with one decoded image resident at a time."""
+def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=False):
+    """Hash/validate a group with one decoded image resident at a time.
+
+    ``skip_invalid`` (used for uploaded packs) skips and reports a broken or
+    oversized image instead of rejecting the whole group.
+    """
     images, sources, seen_hashes = [], [], set()
+    invalid = {'count': 0, 'samples': []}
+
+    def reject(path, reason):
+        if not skip_invalid:
+            raise ValueError(f'{path.name}: {reason}')
+        invalid['count'] += 1
+        if len(invalid['samples']) < 20:
+            invalid['samples'].append(f'{path.name}: {reason}'[:200])
+        if progress:
+            progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
     source_files = source_bytes = image_bytes = cache_bytes = 0
     widths, heights = [], []
     total = sum(1 for path in group_path.iterdir()
@@ -195,7 +209,8 @@ def _local_group_plan(name, group_path, bucket, *, progress=None):
         source_files += 1
         source_bytes += size
         if not 0 < size <= config.limits.source_file_bytes:
-            raise ValueError(f'{path.name}: encoded image size must fit {config.limits.source_file_bytes} bytes')
+            reject(path, f'encoded image size must fit {config.limits.source_file_bytes} bytes')
+            continue
         digest = file_sha256(path)
         if digest in seen_hashes:
             if progress:
@@ -204,16 +219,25 @@ def _local_group_plan(name, group_path, bucket, *, progress=None):
         if len(images) >= config.catalog.max_images:
             raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
         require_memory(config.memory.decode_reserve_bytes)
-        decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        try:
+            decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        except cv2.error as error:
+            if not skip_invalid:
+                raise
+            reject(path, f'cannot decode image ({error.__class__.__name__})')
+            continue
         validation = ImageService.validate_image(decoded)
         if not validation:
-            raise ValueError(f'{path.name}: {validation.error}')
+            reject(path, validation.error)
+            continue
         normalized = ImageService.normalize_image(decoded)
         if not normalized:
-            raise ValueError(f'{path.name}: {normalized.error}')
+            reject(path, normalized.error)
+            continue
         color = ImageService.average_color(normalized.value)
         if not color:
-            raise ValueError(f'{path.name}: {color.error}')
+            reject(path, color.error)
+            continue
         extension = path.suffix.lower()
         key = config.storage.catalog_image_key_template.format(sha256=digest, extension=extension)
         mime = JPEG_CONTENT_TYPE if extension in JPEG_EXTENSIONS else (
@@ -251,6 +275,7 @@ def _local_group_plan(name, group_path, bucket, *, progress=None):
         additional_payload_bytes_upper_bound=image_bytes + len(encoded),
         normalized_cache_bytes=cache_bytes,
         width_min=min(widths), width_max=max(widths), height_min=min(heights), height_max=max(heights),
+        invalid_files=invalid['count'], invalid_samples=invalid['samples'],
     )
     return report, manifest, sources
 

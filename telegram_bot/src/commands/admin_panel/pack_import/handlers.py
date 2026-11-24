@@ -16,6 +16,7 @@ from imager_contracts.catalog_import import CatalogImportRequest
 from src.commands.common_keyboards import add_home_button
 from src.commands.image_generation.upload import BoundedWriter
 from src.infrastructure.services.catalog_import_service import ImportSubmissionUncertain
+from src.infrastructure.services.telegram_files import release_local_file
 from src.models.image_build_params import validate_display_name
 from src.utils.filters.request_filters.admin_filter import AdminFilter
 from src.utils.loggers import exception_logger
@@ -112,7 +113,10 @@ async def _upload_archive_from_telegram(message, descriptor, service):
         required = (expected_size or service.archive_limit) + config.pack_import.disk_headroom_bytes
         if shutil.disk_usage(cache_root).free < required:
             raise ValueError('Недостаточно свободного места для передачи архива в MinIO. Попробуйте позже.')
-        return await service.upload_archive(path, descriptor['import_id'], expected_size=expected_size)
+        reference = await service.upload_archive(path, descriptor['import_id'], expected_size=expected_size)
+        # Up to hundreds of megabytes would otherwise stay in the Bot API cache.
+        release_local_file(message.bot, remote.file_path)
+        return reference
     required = (expected_size or service.archive_limit) + config.pack_import.disk_headroom_bytes
     if shutil.disk_usage(transfer_root).free < required:
         raise ValueError('Недостаточно свободного места для скачивания архива. Попробуйте позже.')
@@ -189,6 +193,12 @@ async def render_status(event, state, service, uow, job):
             text += f'\nОбработано: {progress.get("processed", 0)} из {progress["total"]}.'
     if status == 'completed':
         text += f'\nИзображений: {(job.get("result") or {}).get("count", 0)}.'
+        report = job.get('report') or {}
+        if report.get('skipped_files'):
+            text += f'\nПропущено файлов (не изображения или повреждены): {report["skipped_files"]}.'
+            samples = [str(item)[:100] for item in (report.get('samples') or [])[:5]]
+            if samples:
+                text += '\n' + '\n'.join(f'• {item}' for item in samples)
         try:
             groups = await service.core_gateway.list_groups()
             await uow.image_group_repository.sync_groups(groups.groups)

@@ -71,6 +71,46 @@ class BotObjectStorage:
             'size_bytes': size, 'content_type': content_type,
         }
 
+    @staticmethod
+    def source_prefix(job_id=None):
+        """Key prefix owned by uploaded sources (optionally of one job)."""
+        template = config.storage.source_key_template
+        if job_id is None:
+            return template.split('{', 1)[0]
+        if not isinstance(job_id, str) or not re.fullmatch(JOB_ID_PATTERN, job_id):
+            raise ValueError('Invalid job identifier')
+        return template.split('{sha256}', 1)[0].format(job_id=job_id)
+
+    @classmethod
+    def source_job_id(cls, key):
+        """Job identity encoded in an uploaded-source key, or None if foreign."""
+        prefix = cls.source_prefix()
+        if not isinstance(key, str) or not prefix or not key.startswith(prefix):
+            return None
+        job_id = key[len(prefix):].split('/', 1)[0]
+        if not re.fullmatch(JOB_ID_PATTERN, job_id) or not key.startswith(cls.source_prefix(job_id)):
+            return None
+        return job_id
+
+    def list_sources(self):
+        """Yield (key, last_modified) for every uploaded-source object."""
+        prefix = self.source_prefix()
+        if not prefix:
+            raise ValueError('Uploaded sources need a dedicated key prefix')
+        for item in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
+            if not item.is_dir:
+                yield item.object_name, item.last_modified
+
+    def delete_source(self, job_id, key):
+        """Remove one uploaded source; only keys owned by ``job_id`` are accepted."""
+        if not isinstance(key, str) or self.source_job_id(key) != job_id:
+            raise ValueError('Object is not an uploaded source of this job')
+        try:
+            self.client.remove_object(self.bucket, key)
+        except Exception as error:
+            if getattr(error, 'code', None) not in ('NoSuchKey', 'NoSuchObject', 'NotFound'):
+                raise
+
     def download_result(self, reference, path, *, max_bytes):
         reference = ObjectRef.from_dict(reference).to_dict()
         if reference.get('bucket') != self.bucket:

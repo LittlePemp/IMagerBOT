@@ -288,11 +288,15 @@ class AdminNoticeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             await self.repository.update_admin_notice_recipient('new', 99, state='sent', retry_at=self.now, now=self.now)
         self.assertEqual(self.entry('new')['admin_notice']['recipients']['99']['state'], 'pending')
 
-    async def test_index_supports_new_notice_scan_without_expiring_quota_receipts(self):
+    async def test_index_supports_new_notice_scan_and_bounded_receipt_retention(self):
         await self.repository.initialize_indexes()
         self.assertTrue(any(
             args[0] == [('admissions.state', 1), ('admissions.admin_notice.state', 1),
                         ('admissions.admin_notice.next_attempt_at', 1)]
             for args, kwargs in self.collection.indexes
         ))
-        self.assertTrue(all('expireAfterSeconds' not in kwargs for args, kwargs in self.collection.indexes))
+        expiring = [(args, kwargs) for args, kwargs in self.collection.indexes if 'expireAfterSeconds' in kwargs]
+        # Only whole daily buckets expire, on their creation time, and far beyond
+        # Telegram's 24-hour update redelivery window and the current quota day.
+        self.assertEqual([args[0] for args, _ in expiring], ['created_at'])
+        self.assertGreaterEqual(expiring[0][1]['expireAfterSeconds'], 30 * 24 * 3600)

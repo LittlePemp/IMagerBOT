@@ -95,10 +95,16 @@ class RenderActivities:
             if claim['already_completed']:
                 return claim['result']
             token = claim['token']
-            with LeaseHeartbeat(self.repository, job_id, token, interval=heartbeat_interval) as heartbeat:
-                reference = self.executor.execute(snapshot, token, heartbeat.progress)
-                heartbeat.check()
-            reference = self.repository.complete(job_id, token, reference)
+            uploaded = None
+            try:
+                with LeaseHeartbeat(self.repository, job_id, token, interval=heartbeat_interval) as heartbeat:
+                    uploaded = self.executor.execute(snapshot, token, heartbeat.progress)
+                    heartbeat.check()
+                reference = self.repository.complete(job_id, token, uploaded)
+            except Exception:
+                if uploaded is not None:
+                    self._discard_unpublished_result(job_id, uploaded)
+                raise
             presentation_logger.info(f'Render completed: job_id={job_id}, fence={claim["fence"]}')
             return reference
         except Exception as error:
@@ -118,6 +124,22 @@ class RenderActivities:
                 str(error), type='TransientRenderError' if retryable else 'RenderRejected',
                 non_retryable=not retryable,
             ) from error
+
+    def _discard_unpublished_result(self, job_id, reference):
+        """Delete a result this attempt uploaded but could not publish.
+
+        Result keys contain the attempt token, so a lost attempt's object is
+        referenced by nothing. If the job document cannot be read, the object
+        is left for StorageHygiene rather than risking a published result.
+        """
+        try:
+            current = self.repository.collection.find_one({'_id': job_id}, {'result': 1})
+            if current is None or (current.get('result') or {}).get('key') == reference.get('key'):
+                return
+            self.executor.store.delete_file(reference)
+            presentation_logger.info(f'Removed unpublished result of a lost attempt: job_id={job_id}')
+        except Exception:
+            presentation_logger.exception(f'Cannot remove unpublished result: job_id={job_id}')
 
     @activity.defn(name='record_job_failure')
     def record_job_failure(self, request: dict) -> dict:

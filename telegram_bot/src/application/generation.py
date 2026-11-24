@@ -4,11 +4,12 @@ from copy import deepcopy
 
 from imager_config.loader import config
 from imager_contracts import GenerationParameters, validate_watermark_text
-from src.infrastructure.data.errors import AccessDenied, DailyQuotaExceeded
+from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
 from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
 from src.models.generation_history import generation_history_record_id
 from src.models.image_build_params import ParamType
 from src.models.admission import AdmissionReceipt
+from src.utils.loggers import exception_logger
 
 
 class GenerationSettingsUnavailable(ValueError):
@@ -118,29 +119,56 @@ class SubmitGeneration:
         await self._capacity()
         async with self.gate.acquire(actor_id):
             source = await source_loader(job_id)
-            await self._policy(actor_id, draft)
-            request = GenerateImageRequest(
-                source=source, group_name=draft['image_group'],
-                watermark_text=self.watermark_text,
-                result_size=draft['image_size'], noise_level=draft['noise_level'],
-                cell_size=draft['inset_size'],
-                insertion_format=draft.get('insertion_format', config.generation.insertion_format),
-                alpha_channel=draft.get('alpha_channel', config.generation.alpha_channel),
+            try:
+                return await self._admit(actor_id, draft, job_id, client_context, source)
+            except AdmissionUncertain:
+                # The admission may be stored; the janitor decides later.
+                raise
+            except Exception:
+                await self._discard_source(job_id, source)
+                raise
+
+    async def _admit(self, actor_id, draft, job_id, client_context, source):
+        await self._policy(actor_id, draft)
+        request = GenerateImageRequest(
+            source=source, group_name=draft['image_group'],
+            watermark_text=self.watermark_text,
+            result_size=draft['image_size'], noise_level=draft['noise_level'],
+            cell_size=draft['inset_size'],
+            insertion_format=draft.get('insertion_format', config.generation.insertion_format),
+            alpha_channel=draft.get('alpha_channel', config.generation.alpha_channel),
+        )
+        context = dict(client_context, user_id=actor_id,
+                       history_record_id=generation_history_record_id(job_id))
+        document = await self.gateway.prepare_submission(request, job_id=job_id, client_context=context)
+        async with self.gate.admission_lock:
+            receipt = await self.admissions.find(job_id)
+            if receipt is not None:
+                if receipt.actor_id != actor_id:
+                    raise AccessDenied('Это изображение недоступно.')
+                return receipt
+            quota_exempt = await self._policy(actor_id, draft)
+            await self._capacity()
+            now = datetime.now(timezone.utc)
+            await self._seed_day(actor_id, now)
+            document['created_at'] = document['updated_at'] = now
+            return await self.admissions.accept_submission(
+                document, actor_id=actor_id, now=now, quota_exempt=quota_exempt,
             )
-            context = dict(client_context, user_id=actor_id,
-                           history_record_id=generation_history_record_id(job_id))
-            document = await self.gateway.prepare_submission(request, job_id=job_id, client_context=context)
-            async with self.gate.admission_lock:
-                receipt = await self.admissions.find(job_id)
-                if receipt is not None:
-                    if receipt.actor_id != actor_id:
-                        raise AccessDenied('Это изображение недоступно.')
-                    return receipt
-                quota_exempt = await self._policy(actor_id, draft)
-                await self._capacity()
-                now = datetime.now(timezone.utc)
-                await self._seed_day(actor_id, now)
-                document['created_at'] = document['updated_at'] = now
-                return await self.admissions.accept_submission(
-                    document, actor_id=actor_id, now=now, quota_exempt=quota_exempt,
-                )
+
+    async def _discard_source(self, job_id, source):
+        """Remove a source uploaded for a request that was definitely not admitted.
+
+        The key is shared by every replay of the same Telegram message, so it is
+        deleted only while neither an admission nor a core job references it.
+        Failures are left to the storage janitor.
+        """
+        try:
+            key = source.get('key') if isinstance(source, dict) else None
+            if not key or await self.admissions.find(job_id) is not None:
+                return
+            if await self.gateway.get_job(job_id) is not None:
+                return
+            await self.gateway.delete_source(job_id, key)
+        except Exception:
+            exception_logger.exception(f'Cannot discard unadmitted source: job_id={job_id}')

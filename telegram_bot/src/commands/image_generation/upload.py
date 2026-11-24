@@ -12,7 +12,7 @@ from src.application.image_errors import image_aspect_error
 from src.application.generation import GenerationSettingsUnavailable
 from src.commands.common_keyboards import home_keyboard
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
-from src.infrastructure.services.telegram_files import validate_download_path
+from src.infrastructure.services.telegram_files import release_local_file, validate_download_path
 from src.utils.middlewares.abuse_control import UploadBusy
 from src.utils.navigation import render_view
 from src.utils.result_files import contains_generation_reference, new_result_filename
@@ -88,7 +88,11 @@ class TelegramImageSource:
                     remote.file_path, BoundedWriter(stream, config.limits.source_file_bytes),
                     timeout=config.bot.download_timeout_seconds,
                 )
-            return await self.gateway.upload_source(path, job_id, content_type=content_type)
+            reference = await self.gateway.upload_source(path, job_id, content_type=content_type)
+        # The Local Bot API keeps every downloaded file forever. MinIO now owns
+        # the bytes, so the cached copy is released right away.
+        release_local_file(self.message.bot, remote.file_path)
+        return reference
 
     def _check_disk(self):
         roots = {Path(tempfile.gettempdir())}

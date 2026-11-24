@@ -10,6 +10,7 @@ from imager_config.loader import config
 from settings import settings
 from src.infrastructure.runtime_bootstrap import create_job_repository, create_object_store
 from src.infrastructure.jobs.image_retention import ImageRetention
+from src.infrastructure.jobs.storage_hygiene import StorageHygiene
 from src.infrastructure.catalog_import.bootstrap import create_import_repository
 from src.infrastructure.temporal_client import connect_temporal_client
 from src.shared_kernel.loggers import presentation_logger
@@ -198,6 +199,24 @@ async def retain_images(repository, stop):
                 pass
 
 
+async def keep_storage_clean(repository, import_repository, stop):
+    """Import archives, unreferenced results and expired job documents."""
+    if not config.retention.enabled:
+        return
+    while not stop.is_set():
+        try:
+            store = await asyncio.to_thread(create_object_store)
+            await StorageHygiene(repository.collection, import_repository.collection, store).run(stop)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            presentation_logger.exception('Cannot initialize storage hygiene')
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=config.retention.poll_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+
 async def main():
     repository = create_job_repository()
     import_repository = create_import_repository()
@@ -210,6 +229,7 @@ async def main():
             pass
     async with asyncio.TaskGroup() as tasks:
         tasks.create_task(retain_images(repository, stop), name='generation-artifact-retention')
+        tasks.create_task(keep_storage_clean(repository, import_repository, stop), name='storage-hygiene')
         await run_dispatchers(repository, import_repository, stop)
 
 

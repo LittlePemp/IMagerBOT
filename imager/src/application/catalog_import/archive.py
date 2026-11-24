@@ -15,6 +15,27 @@ _EOCD_SIGNATURE = b'PK\x05\x06'
 _MAX_ZIP_COMMENT = 65535
 _ALLOWED_METHODS = frozenset((zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED))
 
+SKIPPED_SAMPLE_LIMIT = 20
+_SIGNATURES = (
+    (b'\x89PNG\r\n\x1a\n', '.png'), (b'\xff\xd8\xff', '.jpg'), (b'BM', '.bmp'),
+    (b'II*\x00', '.tif'), (b'MM\x00*', '.tif'),
+)
+
+
+def sniff_image_extension(path):
+    """Extension implied by a file's magic bytes, or None for non-images."""
+    with Path(path).open('rb') as stream:
+        head = stream.read(16)
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return '.webp'
+    return next((extension for signature, extension in _SIGNATURES if head.startswith(signature)), None)
+
+
+def _skip(skipped, name, reason):
+    skipped['count'] += 1
+    if len(skipped['samples']) < SKIPPED_SAMPLE_LIMIT:
+        skipped['samples'].append(f'{name[:120]}: {reason}')
+
 
 def _directory_entry_count(path, policy):
     # ZipFile allocates one Python ZipInfo per central-directory record. Bound
@@ -160,6 +181,7 @@ def extract_catalog_archive(path, directory, *, policy=None, progress=None):
             if len(entries) != declared_count or len(entries) > policy.max_entries:
                 raise InvalidCatalogArchive('Количество записей ZIP не соответствует его каталогу.')
             planned, names, files, declared_total = [], set(), set(), 0
+            skipped = {'count': 0, 'samples': []}
             for info in entries:
                 canonical, parts = _safe_name(info, policy)
                 if canonical in names:
@@ -191,26 +213,46 @@ def extract_catalog_archive(path, directory, *, policy=None, progress=None):
                 # Common operating-system metadata is never extracted.
                 if any(part in policy.ignored_directories for part in parts) or parts[-1] in policy.ignored_files or parts[-1].startswith('._'):
                     continue
+                # One stray file (readme, video, empty entry) must not reject a
+                # whole pack: it is skipped and reported. Entries without an
+                # extension are identified by their signature after extraction.
                 extension = Path(parts[-1]).suffix.lower()
-                if extension not in config.catalog.allowed_extensions:
-                    raise InvalidCatalogArchive('ZIP должен содержать только поддерживаемые изображения.')
                 if not info.file_size:
-                    raise InvalidCatalogArchive('ZIP содержит пустое изображение.')
+                    _skip(skipped, info.filename, 'пустой файл')
+                    continue
+                if extension not in config.catalog.allowed_extensions:
+                    if extension:
+                        _skip(skipped, info.filename, 'неподдерживаемый тип файла')
+                        continue
+                    extension = None
                 planned.append((info, extension))
             if not planned:
                 raise InvalidCatalogArchive('В ZIP не найдены изображения.')
-            expanded = 0
+            expanded, files = 0, 0
+            from src.infrastructure.catalog_import.scratch import release_file_cache
             for index, (info, extension) in enumerate(planned):
                 if progress:
                     progress({'phase': 'extracting', 'processed': index, 'total': len(planned)})
-                destination = directory / f'{index:08d}{extension}'
+                destination = directory / f'{index:08d}{extension or ".unknown"}'
                 with destination.open('xb') as target:
                     expanded = _extract_member(path, archive, info, target, policy, expanded)
-                    from src.infrastructure.catalog_import.scratch import release_file_cache
                     release_file_cache(target, flush=True)
+                if extension is None:
+                    sniffed = sniff_image_extension(destination)
+                    if sniffed is None or sniffed not in config.catalog.allowed_extensions:
+                        destination.unlink()
+                        _skip(skipped, info.filename, 'файл без расширения не является изображением')
+                        continue
+                    destination.rename(destination.with_suffix(sniffed))
+                files += 1
             if progress:
                 progress({'phase': 'extracting', 'processed': len(planned), 'total': len(planned)})
-            return {'files': len(planned), 'expanded_bytes': expanded}
+            if not files:
+                raise InvalidCatalogArchive('В ZIP не найдены изображения.')
+            return {'files': files, 'expanded_bytes': expanded,
+                    'skipped': skipped['count'], 'skipped_samples': skipped['samples'],
+                    # Extracted files are named by planned index; keep the originals for reports.
+                    'origins': [info.filename for info, _ in planned]}
     except InvalidCatalogArchive:
         raise
     except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError, EOFError, UnicodeError, zlib.error) as error:

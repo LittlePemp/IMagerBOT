@@ -145,6 +145,14 @@ def _validate(config):
         config.retention.source_count, config.retention.result_count, config.retention.batch_size,
     ):
         raise ConfigurationError('Retention scan must cover retained counts and the cleanup batch')
+    # Worker replicas share one scratch mount: never sweep a directory that a
+    # live activity on another replica may still be using.
+    if config.storage.scratch_max_age_seconds <= max(
+        config.temporal.render.start_to_close_seconds, config.pack_import.activity_timeout_seconds,
+    ):
+        raise ConfigurationError('storage.scratch_max_age_seconds must exceed the longest activity timeout')
+    if config.bot.telegram_cache_max_age_seconds <= config.pack_import.download_timeout_seconds:
+        raise ConfigurationError('bot.telegram_cache_max_age_seconds must exceed the archive download timeout')
     limits, image = config.limits, config.image
     # The one-gigabyte ceiling is a core invariant; configuration can lower it.
     if limits.memory_bytes > WORKER_MEMORY_CEILING_BYTES:

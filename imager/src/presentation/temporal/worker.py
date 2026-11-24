@@ -9,7 +9,9 @@ from temporalio.worker import Worker
 
 from imager_config.loader import config
 from settings import settings
-from src.infrastructure.runtime_bootstrap import create_job_repository, create_render_executor
+from src.infrastructure.runtime_bootstrap import (
+    create_job_repository, create_render_executor, purge_core_scratch,
+)
 from src.infrastructure.temporal_client import connect_temporal_client
 from src.presentation.temporal.activities import RenderActivities
 from src.presentation.temporal.workflows import GenerateImageWorkflow
@@ -28,6 +30,7 @@ async def connect_temporal():
 
 
 async def main():
+    purge_core_scratch()
     client = await connect_temporal()
     activities = RenderActivities(
         repository=create_job_repository(), executor=create_render_executor(),

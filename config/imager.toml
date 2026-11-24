@@ -87,12 +87,15 @@ upload_temp_prefix = "imager-upload-"
 result_temp_prefix = "imager-result-"
 local_result_temp_prefix = ".imager-"
 rpc_temp_prefix = ".rpc-"
+# Crash leftovers in bind-mounted scratch directories are removed at process start.
+# Must exceed the longest activity (import: 1800 s) because replicas share the mount.
+scratch_max_age_seconds = 7200
 
 [catalog]
 max_manifest_bytes = 16000000
 max_images = 100000
 validation_interval = 128
-allowed_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]
+allowed_extensions = [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"]
 
 # Global generation artifacts only; catalog packs and import ZIPs are retained.
 [retention]
@@ -103,6 +106,14 @@ poll_seconds = 30.0
 batch_size = 64
 scan_size = 256
 lease_seconds = 120
+# Import ZIPs are deleted this long after the import reaches a terminal state.
+import_archive_grace_seconds = 600
+# Result objects of lost/abandoned attempts older than this are removed.
+orphan_result_grace_seconds = 21600
+# Terminal job documents whose artifacts are already removed are purged after N days.
+job_document_days = 30
+# Archive, orphan-result and job-document sweeps run on this slower interval.
+hygiene_poll_seconds = 600.0
 
 [mongo]
 connect_timeout_ms = 5000
@@ -219,6 +230,13 @@ history_repair_retry_initial_seconds = 5.0
 history_repair_retry_max_seconds = 300.0
 history_repair_backoff_coefficient = 2.0
 notification_retry_after_grace_seconds = 1.0
+# Local Bot API keeps every downloaded file forever; the bot janitor removes old ones.
+telegram_cache_max_age_seconds = 3600
+janitor_poll_seconds = 600.0
+# Uploaded sources that never became an admission/job are removed after this grace.
+orphan_source_grace_seconds = 21600
+admission_retention_days = 90
+history_retention_days = 180
 
 [pack_import]
 jobs_collection = "catalog_import_jobs"

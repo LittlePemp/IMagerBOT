@@ -10,6 +10,7 @@ from temporalio.worker import Worker
 from imager_config.loader import config
 from settings import settings
 from src.infrastructure.catalog_import.bootstrap import create_import_executor, create_import_repository
+from src.infrastructure.runtime_bootstrap import purge_core_scratch
 from src.infrastructure.temporal_client import connect_temporal_client
 from src.presentation.temporal.import_activities import CatalogImportActivities
 from src.presentation.temporal.import_workflows import ImportCatalogWorkflow
@@ -17,6 +18,7 @@ from src.shared_kernel.loggers import presentation_logger
 
 
 async def main():
+    purge_core_scratch()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):

@@ -44,9 +44,34 @@ class TestCatalogImportArchive(unittest.TestCase):
                               ('pack/nested/a.png', b'other'), ('__MACOSX/._a.png', b'metadata'),
                               ('pack/.DS_Store', b'metadata')])
         report, directory = self.extract(path)
-        self.assertEqual(report, {'files': 2, 'expanded_bytes': 8})
+        self.assertEqual(report, {'files': 2, 'expanded_bytes': 8, 'skipped': 0, 'skipped_samples': [],
+                                  'origins': ['pack/a.PNG', 'pack/nested/a.png']})
         self.assertEqual(sorted(item.name for item in directory.iterdir()), ['00000000.png', '00000001.png'])
         self.assertEqual((directory / '00000001.png').read_bytes(), b'other')
+
+    def test_stray_files_are_skipped_and_reported_instead_of_rejecting_the_pack(self):
+        path = self.make_zip([('a.png', b'png'), ('readme.txt', b'notes'), ('clip.mp4', b'video'),
+                              ('empty.png', b'')])
+        report, directory = self.extract(path)
+        self.assertEqual(report['files'], 1)
+        self.assertEqual(report['skipped'], 3)
+        self.assertEqual(len(report['skipped_samples']), 3)
+        self.assertEqual([item.name for item in directory.iterdir()], ['00000000.png'])
+
+    def test_extensionless_members_are_identified_by_signature(self):
+        jpeg, png = b'\xff\xd8\xff\xe0' + b'J' * 20, b'\x89PNG\r\n\x1a\n' + b'P' * 20
+        webp = b'RIFF\x10\x00\x00\x00WEBPVP8 ' + b'W' * 8
+        path = self.make_zip([('htt', jpeg), ('icon', png), ('sticker', webp), ('notes', b'plain text')])
+        report, directory = self.extract(path)
+        self.assertEqual(report['files'], 3)
+        self.assertEqual(report['skipped'], 1)
+        names = sorted(item.name for item in directory.iterdir())
+        self.assertEqual(names, ['00000000.jpg', '00000001.png', '00000002.webp'])
+        self.assertEqual((directory / '00000000.jpg').read_bytes(), jpeg)
+
+    def test_archive_without_any_image_is_still_rejected(self):
+        with self.assertRaises(InvalidCatalogArchive):
+            self.extract(self.make_zip([('readme', b'just text'), ('notes.txt', b'more')]))
 
     def test_unsafe_paths_are_rejected_before_destination_files(self):
         for name in ('../evil.png', '/evil.png', 'C:/evil.png', 'dir\\evil.png',

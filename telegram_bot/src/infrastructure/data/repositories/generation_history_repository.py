@@ -6,6 +6,7 @@ from bson import ObjectId
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import DuplicateKeyError
 
+from imager_config.loader import config
 from settings import settings
 from src.models.generation_history import GenerationHistoryRecord, generation_history_record_id
 
@@ -19,6 +20,11 @@ class GenerationHistoryRepository:
             'job_id', unique=True, partialFilterExpression={'job_id': {'$type': 'string'}},
         )
         await self.collection.create_index([('telegram_id', 1), ('created_at', -1)])
+        # The projection is disposable; old records expire instead of growing forever.
+        await self.collection.create_index(
+            'created_at', name='generation_history_ttl',
+            expireAfterSeconds=config.bot.history_retention_days * 24 * 3600,
+        )
 
     async def create_record(self, record: GenerationHistoryRecord) -> str:
         document = record.model_dump()

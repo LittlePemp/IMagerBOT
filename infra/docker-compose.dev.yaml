@@ -244,7 +244,7 @@ services:
       - type: bind
         source: ${IMAGER_BOT_API_DATA_PATH:?Run infra/setup.py}
         target: /var/lib/telegram-bot-api
-        read_only: true
+        # Writable: the bot releases transferred files and runs the cache janitor.
     depends_on:
       telegram-bot-api:
         condition: service_healthy

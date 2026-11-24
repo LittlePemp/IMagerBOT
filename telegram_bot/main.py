@@ -40,6 +40,7 @@ from src.infrastructure.data.conversation_storage import preserve_conversations
 from src.infrastructure.services.imager_service import imager_service
 from src.infrastructure.services.imager_service.notifier import GenerationNotifier
 from src.infrastructure.services.catalog_import_service import CatalogImportService
+from src.infrastructure.services.storage_janitor import StorageJanitor
 from src.models.user import User, UserStatus
 from src.support.config import support_config
 from src.support.handlers import create_support_dispatcher
@@ -175,6 +176,7 @@ async def main():
         notifier = GenerationNotifier(
             imager_service, bot, repositories.generation_history_repository,
             progress=progress, on_result_delivered=result_menu,
+            admissions=repositories.admission_repository,
         )
         admission = AdmissionDispatcher(repositories.admission_repository, imager_service, publication_lock=gate.admission_lock)
         admin_notifications = AdminGenerationNotifications(
@@ -182,9 +184,13 @@ async def main():
             repositories.image_group_repository, bot, fixed_admin_ids=settings.telegram_admin_ids,
         )
         projection = CatalogImportProjection(imports, repositories.image_group_repository)
+        janitor = StorageJanitor(
+            imager_service, repositories.admission_repository, local_api=settings.telegram_api_local,
+        )
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
                  asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop)),
-                 asyncio.create_task(admin_notifications.run(stop))]
+                 asyncio.create_task(admin_notifications.run(stop)),
+                 asyncio.create_task(janitor.run(stop))]
         if support_service is not None:
             tasks.append(asyncio.create_task(support_service.run(stop)))
             await support_bot.delete_webhook(drop_pending_updates=False)
