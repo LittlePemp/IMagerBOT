@@ -10,6 +10,7 @@ from imager_contracts import JobRequest
 from imager_contracts.workflow_versions import LEGACY_RENDER_POLICY_V1
 from imager_config.loader import config
 from src.infrastructure.jobs.mongo_jobs import JobBusy, LostExecution
+from src.infrastructure.jobs.storage_hygiene import has_job_reference
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -103,7 +104,7 @@ class RenderActivities:
                 reference = self.repository.complete(job_id, token, uploaded)
             except Exception:
                 if uploaded is not None:
-                    self._discard_unpublished_result(job_id, uploaded)
+                    self._discard_unpublished_result(job_id, token, uploaded)
                 raise
             presentation_logger.info(f'Render completed: job_id={job_id}, fence={claim["fence"]}')
             return reference
@@ -125,16 +126,32 @@ class RenderActivities:
                 non_retryable=not retryable,
             ) from error
 
-    def _discard_unpublished_result(self, job_id, reference):
-        """Delete a result this attempt uploaded but could not publish.
+    def _discard_unpublished_result(self, job_id, execution_token, reference):
+        """Delete only an attempt that has definitely lost publication rights.
 
-        Result keys contain the attempt token, so a lost attempt's object is
-        referenced by nothing. If the job document cannot be read, the object
-        is left for StorageHygiene rather than risking a published result.
+        A timed-out Mongo completion can still commit after its client failed.
+        A read of result=None alone does not prove abandonment. Keep an object
+        while this token may still publish it, and let the grace-period janitor
+        resolve uncertain outcomes after the job reaches a terminal state.
         """
         try:
-            current = self.repository.collection.find_one({'_id': job_id}, {'result': 1})
+            expected_key = config.storage.result_key_template.format(
+                job_id=job_id, execution_token=execution_token,
+                result_filename=config.storage.result_filename,
+            )
+            if reference.get('key') != expected_key:
+                return
+            current = self.repository.collection.find_one(
+                {'_id': job_id}, {'status': 1, 'execution.token': 1, 'result': 1},
+            )
             if current is None or (current.get('result') or {}).get('key') == reference.get('key'):
+                return
+            owner = (current.get('execution') or {}).get('token')
+            terminal = current.get('status') in ('completed', 'failed')
+            replaced = current.get('status') == 'running' and owner and owner != execution_token
+            if not terminal and not replaced:
+                return
+            if has_job_reference(self.repository.collection, reference):
                 return
             self.executor.store.delete_file(reference)
             presentation_logger.info(f'Removed unpublished result of a lost attempt: job_id={job_id}')

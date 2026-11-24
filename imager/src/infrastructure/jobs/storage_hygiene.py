@@ -51,6 +51,14 @@ def result_job_id(key):
     return match['job_id'] if match else None
 
 
+def has_job_reference(jobs, reference):
+    """Existing source/result references pin even another job's attempt key."""
+    return jobs.find_one({'$or': [
+        {field + '.bucket': reference['bucket'], field + '.key': reference['key']}
+        for field in ('request.source', 'result')
+    ]}, {'_id': 1}) is not None
+
+
 class StorageHygiene:
     def __init__(self, jobs, imports, store, *, policy=None, clock=None):
         self.jobs, self.imports, self.store = jobs, imports, store
@@ -111,7 +119,7 @@ class StorageHygiene:
             if job is not None and (job.get('result') or {}).get('key') == key:
                 continue  # the canonical result: ImageRetention owns it
             reference = self.store.reference_for_key(key)
-            if reference is None:
+            if reference is None or has_job_reference(self.jobs, reference):
                 continue
             self.store.delete_file(reference)
             removed += 1
@@ -126,9 +134,17 @@ class StorageHygiene:
             'completion_outbox.state': {'$nin': list(DELIVERING)},
             '$and': [
                 {'$or': [{'request.source': None},
-                         {'artifact_lifecycle.source.state': {'$in': list(GONE)}}]},
+                         {'artifact_lifecycle.source.state': 'deleted'}]},
                 {'$or': [{'result': None},
-                         {'artifact_lifecycle.result.state': {'$in': list(GONE)}}]},
+                         {'artifact_lifecycle.result.state': 'deleted'}]},
+                # History and quota refunds are a separately acknowledged
+                # durable projection. Removing its input before that ack would
+                # make a transient projection failure permanent.
+                {'$or': [
+                    {'request.client_id': {'$ne': 'telegram'}},
+                    {'request.client_context.history_record_id': {'$exists': False}},
+                    {'telegram_history_projection.state': 'synced'},
+                ]},
             ],
         })
         return result.deleted_count

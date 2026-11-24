@@ -6,7 +6,10 @@ bind mounts that outlive containers, so leftovers must be swept explicitly.
 """
 import os
 import shutil
+import stat
+import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 # Media sub-directories that telegram-bot-api (--local) creates per bot token.
@@ -17,6 +20,90 @@ TELEGRAM_MEDIA_DIRECTORIES = frozenset({
     'voice', 'video_notes', 'music', 'temp', 'profile_photos', 'wallpapers',
     'secret', 'secret_thumbnails', 'stories',
 })
+
+
+class _TelegramCacheCoordinator:
+    """Coordinate the single bot process and its threaded cache janitor.
+
+    A getFile call can resolve to a path already used by another request.
+    Register it before the call so a completed transfer cannot remove that
+    path before the new reader has had a chance to pin it.
+    """
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.resolving = Counter()
+        self.readers = Counter()
+        self.deferred = set()
+
+    def busy(self, root, target):
+        return bool(self.resolving[root] or self.readers[(root, target)])
+
+    def drain(self, root):
+        errors = []
+        for owner, target in tuple(self.deferred):
+            if owner != root or self.busy(root, target):
+                continue
+            self.deferred.discard((owner, target))
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                # The bot logs only the type; a Bot API path contains a token.
+                # The age-based janitor can retry the unchanged file later.
+                errors.append(type(error).__name__)
+        return errors
+
+
+_TELEGRAM_CACHE = _TelegramCacheCoordinator()
+
+
+class TelegramCacheTransfer:
+    """Pin a getFile resolution and its eventual reader until transfer ends."""
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.target = None
+        self.cleanup_errors = []
+        self.active = False
+
+    def __enter__(self):
+        with _TELEGRAM_CACHE.lock:
+            if self.active or self.target is not None:
+                raise RuntimeError('Telegram cache transfer is already used')
+            _TELEGRAM_CACHE.resolving[self.root] += 1
+            self.active = True
+        return self
+
+    def bind(self, path):
+        target = Path(path).resolve()
+        if not target.is_relative_to(self.root):
+            raise ValueError('Telegram file is outside the local Bot API directory')
+        with _TELEGRAM_CACHE.lock:
+            if not self.active or self.target is not None:
+                raise RuntimeError('Telegram cache transfer cannot bind another file')
+            # Pin first, then remove the conservative unresolved-getFile pin.
+            _TELEGRAM_CACHE.readers[(self.root, target)] += 1
+            _TELEGRAM_CACHE.resolving[self.root] -= 1
+            if not _TELEGRAM_CACHE.resolving[self.root]:
+                del _TELEGRAM_CACHE.resolving[self.root]
+            self.target = target
+        return target
+
+    def __exit__(self, *exception):
+        with _TELEGRAM_CACHE.lock:
+            if not self.active:
+                return
+            if self.target is None:
+                _TELEGRAM_CACHE.resolving[self.root] -= 1
+                if not _TELEGRAM_CACHE.resolving[self.root]:
+                    del _TELEGRAM_CACHE.resolving[self.root]
+            else:
+                key = self.root, self.target
+                _TELEGRAM_CACHE.readers[key] -= 1
+                if not _TELEGRAM_CACHE.readers[key]:
+                    del _TELEGRAM_CACHE.readers[key]
+            self.active = False
+            self.cleanup_errors.extend(_TELEGRAM_CACHE.drain(self.root))
 
 
 def _age(path, now):
@@ -58,7 +145,7 @@ def purge_telegram_cache(root, max_age_seconds, *, now=None):
     known media directories are removed; databases and unknown files stay.
     Returns (files removed, bytes released).
     """
-    root = Path(root)
+    root = Path(root).resolve()
     if not root.is_dir():
         return 0, 0
     now = time.time() if now is None else now
@@ -73,18 +160,20 @@ def purge_telegram_cache(root, max_age_seconds, *, now=None):
             for current, directories, names in os.walk(media_dir, followlinks=False):
                 for name in names:
                     path = Path(current) / name
-                    try:
-                        info = path.lstat()
-                    except FileNotFoundError:
-                        continue
-                    if not os.path.isfile(path) or path.is_symlink() or now - info.st_mtime <= max_age_seconds:
-                        continue
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        continue
-                    files += 1
-                    released += info.st_size
+                    with _TELEGRAM_CACHE.lock:
+                        if _TELEGRAM_CACHE.busy(root, path):
+                            continue
+                        try:
+                            # Check age and type under the same guard as the
+                            # unlink and registration of new getFile readers.
+                            info = path.lstat()
+                            if not stat.S_ISREG(info.st_mode) or now - info.st_mtime <= max_age_seconds:
+                                continue
+                            path.unlink()
+                        except FileNotFoundError:
+                            continue
+                        files += 1
+                        released += info.st_size
     return files, released
 
 
@@ -101,8 +190,12 @@ def release_telegram_file(root, path):
     parts = target.relative_to(root).parts
     if len(parts) < 3 or parts[1] not in TELEGRAM_MEDIA_DIRECTORIES:
         raise ValueError('Telegram file is not a downloaded media file')
-    try:
-        target.unlink()
-    except FileNotFoundError:
-        return False
-    return True
+    with _TELEGRAM_CACHE.lock:
+        if _TELEGRAM_CACHE.busy(root, target):
+            _TELEGRAM_CACHE.deferred.add((root, target))
+            return False
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            return False
+        return True

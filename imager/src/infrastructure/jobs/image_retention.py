@@ -8,6 +8,7 @@ from pymongo import ReturnDocument
 
 from imager_config.loader import config
 from imager_contracts import ObjectRef
+from imager_contracts.storage_keys import is_owned_source_key
 from src.shared_kernel.loggers import presentation_logger
 
 
@@ -67,11 +68,9 @@ class ImageRetention:
         if any(not prefix or key.startswith(prefix) for prefix in protected):
             raise ValueError('Generation artifact points into a catalog/import namespace')
         if kind == 'source':
-            expected = config.storage.source_key_template.format(job_id=job_id, sha256=ref['sha256'])
-            # Accepted historical uploads used the configured source filename.
-            legacy = {f'uploads/{job_id}/{name}' for name in (
-                config.storage.source_filename, config.storage.upload_filename,
-            )}
+            # One ownership rule is shared with bot uploads and the gallery,
+            # including immutable upload-attempt keys and accepted old layouts.
+            owned = is_owned_source_key(key, job_id, ref['sha256'], config.storage)
         else:
             token = (document.get('execution') or {}).get('token')
             if not token:
@@ -80,8 +79,8 @@ class ImageRetention:
                 job_id=job_id, execution_token=token,
                 result_filename=config.storage.result_filename,
             )
-            legacy = set()
-        if key != expected and key not in legacy:
+            owned = key == expected
+        if not owned:
             raise ValueError('Artifact is not owned by this job under a recognized storage layout')
         if ref['bucket'] != self.object_store.bucket:
             raise ValueError('Artifact uses a different bucket')

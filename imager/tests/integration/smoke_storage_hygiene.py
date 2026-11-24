@@ -55,9 +55,12 @@ def main(mongo_uri, endpoint, access, secret):
             lost = upload(store, directory, 'jobs/job_done/attempts/tok0/result.jpg', b'lost attempt')
             running = upload(store, directory, 'jobs/job_run/attempts/tok2/result.jpg', b'in progress')
             orphan = upload(store, directory, 'jobs/job_gone/attempts/tok3/result.jpg', b'no document')
+            pinned_source = upload(store, directory, 'jobs/job_done/attempts/tok_shared/result.jpg', b'reused source')
             jobs.insert_many([
                 {'_id': 'job_done', 'status': 'completed', 'updated_at': now, 'result': canonical},
                 {'_id': 'job_run', 'status': 'running', 'updated_at': now},
+                {'_id': 'source_consumer', 'status': 'running', 'updated_at': now,
+                 'request': {'source': pinned_source}},
                 # --- documents to purge or keep ----------------------------------
                 {'_id': 'old_clean', 'status': 'completed', 'updated_at': old, 'request': {'source': {'key': 'x'}},
                  'result': {'key': 'y'}, 'artifact_lifecycle': {'source': {'state': 'deleted'},
@@ -70,20 +73,36 @@ def main(mongo_uri, endpoint, access, secret):
                 {'_id': 'old_undelivered', 'status': 'failed', 'updated_at': old, 'request': {'source': None},
                  'completion_outbox': {'state': 'pending'}},
                 {'_id': 'recent_clean', 'status': 'failed', 'updated_at': now, 'request': {'source': None}},
+                {'_id': 'old_unmanaged', 'status': 'failed', 'updated_at': old,
+                 'request': {'source': {'key': 'unknown-layout/source'}},
+                 'artifact_lifecycle': {'source': {'state': 'unmanaged'}}},
             ])
+            for state in (None, 'pending', 'claimed', 'synced'):
+                row = {
+                    '_id': 'old_history_' + str(state), 'status': 'failed', 'updated_at': old,
+                    'request': {'client_id': 'telegram', 'source': None,
+                                'client_context': {'history_record_id': 'history-' + str(state)}},
+                    'completion_outbox': {'state': 'sent'},
+                }
+                if state is not None:
+                    row['telegram_history_projection'] = {'state': state}
+                jobs.insert_one(row)
 
         policy = replace(config.retention, import_archive_grace_seconds=60, orphan_result_grace_seconds=60)
         hygiene = StorageHygiene(jobs, imports, store, policy=policy, clock=lambda: later)
         report = hygiene.cleanup_once()
-        assert report == {'import_archives': 1, 'orphan_results': 2, 'job_documents': 2}, report
+        assert report == {'import_archives': 1, 'orphan_results': 2, 'job_documents': 3}, report
 
         assert not exists(store, done['key']) and exists(store, live['key']) and exists(store, catalog['key'])
         assert imports.find_one({'_id': 'imp_done'})['archive_lifecycle']['state'] == 'deleted'
         assert imports.find_one({'_id': 'imp_foreign'})['archive_lifecycle']['state'] == 'unmanaged'
-        assert exists(store, canonical['key']) and exists(store, running['key'])
+        assert exists(store, canonical['key']) and exists(store, running['key']) and exists(store, pinned_source['key'])
         assert not exists(store, lost['key']) and not exists(store, orphan['key'])
         remaining = {row['_id'] for row in jobs.find({}, {'_id': 1})}
-        assert remaining == {'job_done', 'job_run', 'old_with_result', 'old_undelivered', 'recent_clean'}, remaining
+        assert remaining == {
+            'job_done', 'job_run', 'source_consumer', 'old_with_result', 'old_undelivered',
+            'recent_clean', 'old_unmanaged', 'old_history_None', 'old_history_pending', 'old_history_claimed',
+        }, remaining
 
         # Idempotent: a second pass finds nothing more to do.
         assert hygiene.cleanup_once() == {'import_archives': 0, 'orphan_results': 0, 'job_documents': 0}

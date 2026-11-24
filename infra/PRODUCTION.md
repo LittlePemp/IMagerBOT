@@ -194,17 +194,25 @@ roundtrip через gateway в отдельном fixture, включая multi
 
 - Исходник, загруженный ботом для непринятой заявки, бот удаляет сразу (если нет
   ни admission, ни core job с тем же `job_id`). Остатки после падения процесса
-  удаляет janitor бота через `bot.orphan_source_grace_seconds`; заявка в его
-  outbox или core job защищает объект.
-- Результат попытки, потерявшей lease, удаляет сама попытка. Остатки удаляет
+  удаляет janitor бота через `bot.orphan_source_grace_seconds`; точная ссылка
+  в outbox или core job защищает объект. Загрузка и очистка согласованы по job ID,
+  перед удалением повторно проверяется возраст объекта. Каждый новый PUT имеет
+  отдельный ключ `uploads/{job_id}/attempts/{upload_token}/{sha256}.jpg`, поэтому
+  запоздалый DELETE прежней попытки не удалит повторную загрузку. Старые ключи
+  остаются читаемыми и очищаемыми.
+- Результат попытки удаляется сразу только после подтверждённой потери права
+  публикации. Неопределённый результат записи Mongo сохраняет JPEG. Остатки удаляет
   `StorageHygiene` в dispatcher через `retention.orphan_result_grace_seconds`,
   только если job завершён и его канонический `result` указывает на другой ключ
-  (или документа нет).
+  (или документа нет). Существующие ссылки source/result других jobs сохраняются.
 - ZIP завершённого импорта удаляется через `retention.import_archive_grace_seconds`.
 - Терминальные job-документы, у которых исходник и результат уже удалены и
   доставка не выполняется, удаляются через `retention.job_document_days`.
-  Дневные корзины квоты бота и проекция истории имеют TTL
-  (`bot.admission_retention_days`, `bot.history_retention_days`).
+  Telegram jobs с history ID дополнительно ждут `telegram_history_projection.state=synced`;
+  `unmanaged` не считается удалённым файлом. Для дневных корзин TTL назначается
+  по `expires_at` только после публикации всех admissions и завершения уведомлений;
+  незавершённые операции не истекают. Сроки закрытых корзин и проекции истории:
+  `bot.admission_retention_days`, `bot.history_retention_days`.
 - Каталоги во временных scratch-путях, оставшиеся после OOM/SIGKILL, удаляются
   при старте процесса, если они старше `storage.scratch_max_age_seconds`
   (больше самого долгого activity, так как реплики делят один mount).

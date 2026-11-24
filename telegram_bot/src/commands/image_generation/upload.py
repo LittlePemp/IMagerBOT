@@ -12,7 +12,7 @@ from src.application.image_errors import image_aspect_error
 from src.application.generation import GenerationSettingsUnavailable
 from src.commands.common_keyboards import home_keyboard
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
-from src.infrastructure.services.telegram_files import release_local_file, validate_download_path
+from src.infrastructure.services.telegram_files import local_file_transfer, release_local_file, validate_download_path
 from src.utils.middlewares.abuse_control import UploadBusy
 from src.utils.navigation import render_view
 from src.utils.result_files import contains_generation_reference, new_result_filename
@@ -76,23 +76,24 @@ class TelegramImageSource:
     async def __call__(self, job_id):
         image, content_type = self.validate()
         self._check_disk()
-        remote = await self.message.bot.get_file(image.file_id)
-        validate_download_path(self.message.bot, remote)
-        if remote.file_size is not None and remote.file_size > config.limits.source_file_bytes:
-            raise ValueError('Размер исходного файла превышает допустимый предел.')
-        self._check_disk()
-        with tempfile.TemporaryDirectory(prefix=config.storage.upload_temp_prefix) as directory:
-            path = Path(directory) / config.storage.upload_filename
-            with path.open('wb+') as stream:
-                await self.message.bot.download_file(
-                    remote.file_path, BoundedWriter(stream, config.limits.source_file_bytes),
-                    timeout=config.bot.download_timeout_seconds,
-                )
-            reference = await self.gateway.upload_source(path, job_id, content_type=content_type)
-        # The Local Bot API keeps every downloaded file forever. MinIO now owns
-        # the bytes, so the cached copy is released right away.
-        release_local_file(self.message.bot, remote.file_path)
-        return reference
+        with local_file_transfer(self.message.bot) as transfer:
+            remote = await self.message.bot.get_file(image.file_id)
+            validate_download_path(self.message.bot, remote)
+            if transfer is not None:
+                transfer.bind(remote.file_path)
+            if remote.file_size is not None and remote.file_size > config.limits.source_file_bytes:
+                raise ValueError('Размер исходного файла превышает допустимый предел.')
+            self._check_disk()
+            with tempfile.TemporaryDirectory(prefix=config.storage.upload_temp_prefix) as directory:
+                path = Path(directory) / config.storage.upload_filename
+                with path.open('wb+') as stream:
+                    await self.message.bot.download_file(
+                        remote.file_path, BoundedWriter(stream, config.limits.source_file_bytes),
+                        timeout=config.bot.download_timeout_seconds,
+                    )
+                reference = await self.gateway.upload_source(path, job_id, content_type=content_type)
+            release_local_file(self.message.bot, remote.file_path)
+            return reference
 
     def _check_disk(self):
         roots = {Path(tempfile.gettempdir())}

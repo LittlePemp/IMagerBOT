@@ -18,7 +18,7 @@ from pymongo import AsyncMongoClient
 from imager_config.loader import config
 from imager_contracts import make_submission
 from src.infrastructure.data.errors import DailyQuotaExceeded
-from src.infrastructure.data.repositories.admission_repository import AdmissionRepository
+from src.infrastructure.data.repositories.admission_repository import AdmissionRepository, DailyAdmissionLimitExceeded
 
 
 def submission(job_id, actor_id):
@@ -66,10 +66,51 @@ async def exercise(database):
     assert await repository.remaining(admin, now=now) == 5
     assert await repository.refund('admin1') is False
 
+    # Refunded failures cannot grow one ordinary BSON bucket indefinitely.
+    retrying_actor = 88
+    for index in range(config.bot.max_daily_admissions):
+        job_id = f'refunded-{index}'
+        await repository.accept_submission(submission(job_id, retrying_actor), actor_id=retrying_actor, now=now)
+        assert await repository.refund(job_id, now=now)
+    assert await repository.remaining(retrying_actor, now) == 5
+    for operation in (
+        lambda: repository.ensure_admission_capacity(retrying_actor, now=now),
+        lambda: repository.accept_submission(submission('excess-attempt', retrying_actor), actor_id=retrying_actor, now=now),
+    ):
+        try:
+            await operation()
+            raise AssertionError('daily attempt budget must reject further new receipts')
+        except DailyAdmissionLimitExceeded:
+            pass
+    replay = await repository.accept_submission(submission('refunded-0', retrying_actor), actor_id=retrying_actor, now=now)
+    assert replay.duplicate
+    bucket_id, _, _ = repository._day(retrying_actor, now)
+    bucket = await database['admissions'].find_one({'_id': bucket_id})
+    assert len(bucket['admissions']) == config.bot.max_daily_admissions and 'expires_at' not in bucket
+
+    # Lifecycle TTL protects accepted commands and pending notifications.
+    lifecycle = AdmissionRepository(
+        database['lifecycle_admissions'], timezone='Europe/Moscow', daily_limit=5, lease_seconds=60, retry_seconds=3,
+    )
+    await lifecycle.initialize_indexes()
+    await lifecycle.accept_submission(submission('lifecycle', 99), actor_id=99, now=now)
+    claim = await lifecycle.claim(now=now)
+    assert await lifecycle.acknowledge(claim.job_id, claim.token, now=now)
+    bucket = await database['lifecycle_admissions'].find_one({'admissions.job_id': 'lifecycle'})
+    assert 'expires_at' not in bucket  # administrator fanout remains pending
+    assert await lifecycle.initialize_admin_notice('lifecycle', [], now=now)
+    assert await lifecycle.complete_admin_notice('lifecycle', now=now)
+    bucket = await database['lifecycle_admissions'].find_one({'admissions.job_id': 'lifecycle'})
+    assert bucket['expires_at'] > now
+    await lifecycle.accept_submission(submission('lifecycle-new', 99), actor_id=99, now=now)
+    bucket = await database['lifecycle_admissions'].find_one({'admissions.job_id': 'lifecycle'})
+    assert 'expires_at' not in bucket
+
     indexes = await database['admissions'].index_information()
-    ttl = indexes['admission_bucket_ttl']
-    assert ttl['key'] == [('created_at', 1)]
-    assert ttl['expireAfterSeconds'] == config.bot.admission_retention_days * 24 * 3600
+    assert 'admission_bucket_ttl' not in indexes
+    ttl = indexes['admission_bucket_expiry_ttl']
+    assert ttl['key'] == [('expires_at', 1)]
+    assert ttl['expireAfterSeconds'] == 0
     print('quota refund smoke: OK')
 
 

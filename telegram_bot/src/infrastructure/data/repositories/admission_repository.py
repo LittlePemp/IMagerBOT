@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
 from pymongo.write_concern import WriteConcern
 
 from imager_config.loader import config
@@ -20,11 +20,20 @@ from src.infrastructure.data.errors import AdmissionConflict, AdmissionUncertain
 from src.models.admission import AdmissionClaim, AdmissionReceipt
 
 
+class DailyAdmissionLimitExceeded(ValueError):
+    """A bounded attempt budget is separate from the successful-image quota."""
+
+    def __init__(self, limit, reset_at):
+        self.limit, self.reset_at = limit, reset_at
+        super().__init__(f'Достигнут дневной лимит попыток обработки: {limit}. Повторите завтра.')
+
+
 class AdmissionRepository:
     def __init__(self, collection: AsyncCollection, *, timezone, daily_limit, lease_seconds, retry_seconds):
         self.collection = collection.with_options(write_concern=WriteConcern(w=1, j=True))
         self.timezone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
         self.daily_limit = daily_limit
+        self.daily_admission_limit = config.bot.max_daily_admissions
         self.lease_seconds = lease_seconds
         self.retry_seconds = retry_seconds
         if daily_limit <= 0 or lease_seconds <= 0 or retry_seconds <= 0:
@@ -40,14 +49,61 @@ class AdmissionRepository:
             ('actor_id', 1), ('date', -1), ('last_admitted_at', -1), ('created_at', -1),
         ])
         await self.collection.create_index([('actor_id', 1), ('date', 1), ('quota_exempt', 1)])
+        await self.collection.create_index(
+            [('admissions.document.request.source.bucket', 1),
+             ('admissions.document.request.source.key', 1)], name='admission_source_reference',
+        )
         await self.collection.create_index([
             ('admissions.state', 1), ('admissions.admin_notice.state', 1),
             ('admissions.admin_notice.next_attempt_at', 1),
         ])
-        # Daily buckets (and their frozen request copies) are not kept forever.
+        # The old creation-time TTL also deleted unpublished commands. Remove
+        # only our known legacy index, before enabling lifecycle expiry.
+        for name, definition in (await self.collection.index_information()).items():
+            keys = definition.get('key', [])
+            keys = list(keys.items()) if isinstance(keys, dict) else list(keys)
+            if (name != 'admission_bucket_ttl' or keys != [('created_at', 1)]
+                    or 'expireAfterSeconds' not in definition):
+                continue
+            try:
+                await self.collection.drop_index(name)
+            except OperationFailure as error:
+                if error.code != 27:  # A concurrent startup already removed it.
+                    raise
+        await self.collection.update_many(
+            {'expires_at': {'$exists': True}, '$or': self._unfinished_buckets()},
+            {'$unset': {'expires_at': ''}},
+        )
+        # Closed legacy buckets get a fresh retention window; never guess that
+        # an old receipt/outbox can be deleted immediately during migration.
+        await self.collection.update_many(
+            {'expires_at': {'$exists': False}, '$nor': self._unfinished_buckets()},
+            {'$set': {'expires_at': self._expiry(self._now(None))}},
+        )
         await self.collection.create_index(
-            'created_at', name='admission_bucket_ttl',
-            expireAfterSeconds=config.bot.admission_retention_days * 24 * 3600,
+            'expires_at', name='admission_bucket_expiry_ttl', expireAfterSeconds=0,
+        )
+
+    @staticmethod
+    def _unfinished_buckets():
+        return [
+            {'admissions': {'$elemMatch': {'state': {'$ne': 'sent'}}}},
+            {'admissions': {'$elemMatch': {
+                'admin_notice.state': {'$exists': True, '$ne': 'done'},
+            }}},
+        ]
+
+    @staticmethod
+    def _expiry(moment):
+        return moment + timedelta(days=config.bot.admission_retention_days)
+
+    async def _schedule_expiry(self, job_id, *, now):
+        # The predicate is atomic with setting the deadline. A simultaneous
+        # acceptance/retry also unsets it in its own update.
+        await self.collection.update_one(
+            {'admissions.job_id': job_id, 'expires_at': {'$exists': False},
+             '$nor': self._unfinished_buckets()},
+            {'$set': {'expires_at': self._expiry(now)}},
         )
 
     @staticmethod
@@ -81,6 +137,14 @@ class AdmissionRepository:
         found = await self._find_entry(job_id)
         return self._receipt(*found, duplicate=True) if found else None
 
+    async def source_is_referenced(self, bucket, key):
+        """Pin one exact source; bucket and key must belong to the same entry."""
+        return await self.collection.find_one(
+            {'admissions': {'$elemMatch': {
+                'document.request.source.bucket': bucket, 'document.request.source.key': key,
+            }}}, {'_id': 1},
+        ) is not None
+
     async def latest(self, actor_id):
         bucket = await self.collection.find_one(
             {'actor_id': actor_id, 'admissions.0': {'$exists': True}},
@@ -110,6 +174,13 @@ class AdmissionRepository:
         exempt_used = await self._exempt_count(actor_id, day)
         return max(0, self.daily_limit - exempt_used - (document['used'] if document else 0))
 
+    async def ensure_admission_capacity(self, actor_id, now=None):
+        moment = self._now(now)
+        bucket_id, _, reset = self._day(actor_id, moment)
+        bucket = await self.collection.find_one({'_id': bucket_id}, {'admissions.job_id': 1})
+        if bucket is not None and len(bucket.get('admissions', [])) >= self.daily_admission_limit:
+            raise DailyAdmissionLimitExceeded(self.daily_admission_limit, reset)
+
     async def _exempt_count(self, actor_id, day):
         # Kept separately so revoking an administrator does not reset the
         # ordinary account's usage or lose accepted-but-not-published images.
@@ -136,6 +207,7 @@ class AdmissionRepository:
             await self.collection.update_one({'_id': bucket_id}, {'$setOnInsert': {
                 '_id': bucket_id, 'actor_id': actor_id, 'date': day,
                 'used': min(initial_used, self.daily_limit), 'admissions': [], 'created_at': moment,
+                'expires_at': self._expiry(moment),
             }}, upsert=True)
         except DuplicateKeyError:
             # Another caller already initialized the day with its authoritative seed.
@@ -200,9 +272,10 @@ class AdmissionRepository:
                 ordinary_limit = max(0, self.daily_limit - await self._exempt_count(actor_id, day))
                 bucket = await self.collection.find_one_and_update(
                     {'_id': bucket_id, 'used': {'$lt': ordinary_limit},
+                     f'admissions.{self.daily_admission_limit - 1}': {'$exists': False},
                      'admissions.job_id': {'$ne': document['_id']}},
                     {'$inc': {'used': 1}, '$push': {'admissions': entry},
-                     '$set': {'last_admitted_at': moment}},
+                     '$set': {'last_admitted_at': moment}, '$unset': {'expires_at': ''}},
                     return_document=ReturnDocument.AFTER,
                 )
             if bucket:
@@ -221,6 +294,8 @@ class AdmissionRepository:
         found = await self._find_entry(document['_id'])
         if found:
             return self._matching_receipt(found, document)
+        if not quota_exempt:
+            await self.ensure_admission_capacity(actor_id, now=moment)
         raise DailyQuotaExceeded(self.daily_limit, reset)
 
     async def refund(self, job_id, now=None):
@@ -321,10 +396,13 @@ class AdmissionRepository:
         return bool(result.matched_count)
 
     async def acknowledge(self, job_id, token, now=None):
+        moment = self._now(now)
         result = await self.collection.update_one(self._claim_filter(job_id, token), {'$set': {
-            'admissions.$.state': 'sent', 'admissions.$.sent_at': self._now(now),
+            'admissions.$.state': 'sent', 'admissions.$.sent_at': moment,
             'admissions.$.token': None, 'admissions.$.last_error': None,
         }})
+        if result.matched_count:
+            await self._schedule_expiry(job_id, now=moment)
         return bool(result.matched_count)
 
     async def retry(self, job_id, token, error, *, error_max_length, now=None):
@@ -333,7 +411,7 @@ class AdmissionRepository:
             'admissions.$.state': 'pending', 'admissions.$.token': None,
             'admissions.$.next_attempt_at': moment + timedelta(seconds=self.retry_seconds),
             'admissions.$.last_error': str(error)[:error_max_length],
-        }})
+        }, '$unset': {'expires_at': ''}})
         return bool(result.matched_count)
 
     async def next_admin_notice(self, now=None):
@@ -439,6 +517,7 @@ class AdmissionRepository:
             # Reopen only this definite rejection. Keep an earlier due sibling.
             fields['admissions.$.admin_notice.state'] = 'pending'
             update['$min'] = {'admissions.$.admin_notice.next_attempt_at': retry_at}
+            update['$unset'] = {'expires_at': ''}
         result = await self.collection.update_one(
             self._notice_filter(job_id, **{f'{path}.state': 'uncertain'}), update,
         )
@@ -487,4 +566,6 @@ class AdmissionRepository:
                 'admin_notice.state': 'pending', 'admin_notice.recipients': recipients,
             }), {'$set': fields},
         )
+        if result.matched_count and not pending:
+            await self._schedule_expiry(job_id, now=moment)
         return bool(result.matched_count) and not pending

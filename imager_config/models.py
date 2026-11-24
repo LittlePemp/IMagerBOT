@@ -3,6 +3,9 @@ from dataclasses import dataclass
 
 
 WORKER_MEMORY_CEILING_BYTES = 1_000_000_000
+# Daily receipts carry frozen requests (including up to 8 KiB of client context).
+# This conservative ceiling leaves room below MongoDB's document-size limit.
+MAX_DAILY_ADMISSION_RECEIPTS = 256
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,7 @@ class RuntimeStorageConfig:
     manifest_filename: str
     result_filename: str
     source_key_template: str
+    source_attempt_key_template: str
     result_key_template: str
     catalog_image_key_template: str
     catalog_manifest_key_template: str
@@ -232,6 +236,7 @@ class RuntimeBotConfig:
     result_size_min: int
     result_size_max: int
     regular_user_upload_limit: int
+    max_daily_admissions: int
     admission_poll_seconds: float
     admission_lease_seconds: int
     admission_retry_seconds: float

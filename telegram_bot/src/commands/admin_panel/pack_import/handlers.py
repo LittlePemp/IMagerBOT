@@ -16,7 +16,7 @@ from imager_contracts.catalog_import import CatalogImportRequest
 from src.commands.common_keyboards import add_home_button
 from src.commands.image_generation.upload import BoundedWriter
 from src.infrastructure.services.catalog_import_service import ImportSubmissionUncertain
-from src.infrastructure.services.telegram_files import release_local_file
+from src.infrastructure.services.telegram_files import local_file_transfer, release_local_file
 from src.models.image_build_params import validate_display_name
 from src.utils.filters.request_filters.admin_filter import AdminFilter
 from src.utils.loggers import exception_logger
@@ -92,6 +92,11 @@ async def receive_archive(message, state, catalog_import_service):
 
 
 async def _upload_archive_from_telegram(message, descriptor, service):
+    with local_file_transfer(message.bot) as transfer:
+        return await _upload_archive_with_transfer(message, descriptor, service, transfer)
+
+
+async def _upload_archive_with_transfer(message, descriptor, service, transfer):
     local = getattr(settings, 'telegram_api_local', False)
     cache_root = Path(config.pack_import.bot_api_container_directory).resolve()
     transfer_root = cache_root if local else Path(tempfile.gettempdir())
@@ -108,6 +113,8 @@ async def _upload_archive_from_telegram(message, descriptor, service):
         path = Path(remote.file_path).resolve()
         if not path.is_relative_to(cache_root):
             raise ValueError('Telegram вернул недопустимый путь к архиву.')
+        if transfer is not None:
+            transfer.bind(path)
         # getFile may itself have filled the shared cache. Preserve room for
         # storage writes, without depending on the bot's temporary directory.
         required = (expected_size or service.archive_limit) + config.pack_import.disk_headroom_bytes

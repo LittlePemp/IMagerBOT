@@ -181,6 +181,27 @@ def _local_groups(directory, group_name):
     return groups
 
 
+def _local_image_info(path):
+    """Return metadata only; release every decoded array before the next file.
+
+    Keeping this frame separate also releases validation Result.value aliases
+    when an unsupported dtype or another image validation fails.
+    """
+    require_memory(config.memory.decode_reserve_bytes)
+    decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    validation = ImageService.validate_image(decoded)
+    if not validation:
+        raise ValueError(validation.error)
+    normalized = ImageService.normalize_image(decoded)
+    if not normalized:
+        raise ValueError(normalized.error)
+    color = ImageService.average_color(normalized.value)
+    if not color:
+        raise ValueError(color.error)
+    height, width = normalized.value.shape[:2]
+    return color.value, width, height, normalized.value.nbytes
+
+
 def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=False):
     """Hash/validate a group with one decoded image resident at a time.
 
@@ -198,7 +219,7 @@ def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=F
             invalid['samples'].append(f'{path.name}: {reason}'[:200])
         if progress:
             progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
-    source_files = source_bytes = image_bytes = cache_bytes = 0
+    source_files = source_bytes = image_bytes = cache_bytes = duplicate_files = 0
     widths, heights = [], []
     total = sum(1 for path in group_path.iterdir()
                 if path.is_file() and path.suffix.lower() in config.catalog.allowed_extensions) if progress else 0
@@ -213,30 +234,21 @@ def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=F
             continue
         digest = file_sha256(path)
         if digest in seen_hashes:
+            duplicate_files += 1
             if progress:
                 progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
             continue
         if len(images) >= config.catalog.max_images:
             raise ValueError(f'Catalog group exceeds {config.catalog.max_images} images')
-        require_memory(config.memory.decode_reserve_bytes)
         try:
-            decoded = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+            color, width, height, decoded_bytes = _local_image_info(path)
         except cv2.error as error:
             if not skip_invalid:
                 raise
             reject(path, f'cannot decode image ({error.__class__.__name__})')
             continue
-        validation = ImageService.validate_image(decoded)
-        if not validation:
-            reject(path, validation.error)
-            continue
-        normalized = ImageService.normalize_image(decoded)
-        if not normalized:
-            reject(path, normalized.error)
-            continue
-        color = ImageService.average_color(normalized.value)
-        if not color:
-            reject(path, color.error)
+        except ValueError as error:
+            reject(path, str(error))
             continue
         extension = path.suffix.lower()
         key = config.storage.catalog_image_key_template.format(sha256=digest, extension=extension)
@@ -244,16 +256,14 @@ def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=F
             PNG_CONTENT_TYPE if extension == '.png' else BINARY_CONTENT_TYPE
         )
         reference = ObjectRef(bucket, key, digest, size, mime).to_dict()
-        height, width = normalized.value.shape[:2]
-        images.append({'object': reference, 'color': list(color.value),
+        images.append({'object': reference, 'color': list(color),
                        'width': width, 'height': height})
         sources.append((path, reference))
         widths.append(width)
         heights.append(height)
         image_bytes += size
-        cache_bytes += normalized.value.nbytes
+        cache_bytes += decoded_bytes
         seen_hashes.add(digest)
-        del decoded, normalized, validation
         if progress:
             progress({'phase': 'validating', 'processed': source_files, 'total': total, 'path': str(path)})
     if not images:
@@ -270,7 +280,7 @@ def _local_group_plan(name, group_path, bucket, *, progress=None, skip_invalid=F
     manifest_ref = ObjectRef(bucket, manifest_key, revision, len(encoded), JSON_CONTENT_TYPE).to_dict()
     report = dict(
         group=name, name=name, count=len(images), revision=revision, manifest=manifest_ref,
-        source_files=source_files, duplicate_files=source_files - len(images),
+        source_files=source_files, duplicate_files=duplicate_files,
         source_bytes=source_bytes, unique_image_bytes=image_bytes, manifest_bytes=len(encoded),
         additional_payload_bytes_upper_bound=image_bytes + len(encoded),
         normalized_cache_bytes=cache_bytes,

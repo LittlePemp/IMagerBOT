@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from imager_config.loader import config
+from src.application.source_lifecycle import SourceLifecycle
 from imager_contracts.scratch import (
     purge_stale_entries, purge_telegram_cache, release_telegram_file,
 )
@@ -111,24 +112,33 @@ class TestStorageJanitor(unittest.IsolatedAsyncioTestCase):
         self.gateway = SimpleNamespace(
             list_sources=AsyncMock(return_value=list(self.keys.values())),
             get_job=AsyncMock(side_effect=lambda job_id: {'_id': job_id} if job_id == 'core-job' else None),
-            delete_source=AsyncMock(),
+            source_bucket='imager',
+            source_is_referenced=AsyncMock(side_effect=lambda key: key == self.keys['core'][0]),
+            delete_source=AsyncMock(return_value=True),
         )
         self.admissions = SimpleNamespace(
             find=AsyncMock(side_effect=lambda job_id: object() if job_id == 'admitted-job' else None),
+            source_is_referenced=AsyncMock(side_effect=lambda bucket, key: key == self.keys['admitted'][0]),
         )
 
     async def test_only_unreferenced_sources_past_grace_are_deleted(self):
-        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False, clock=lambda: self.now)
+        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False,
+                                 source_lifecycle=SourceLifecycle(), clock=lambda: self.now)
         self.assertEqual(await janitor.sweep_orphan_sources(), 1)
-        self.gateway.delete_source.assert_awaited_once_with(JOB, self.keys['orphan'][0])
+        self.gateway.delete_source.assert_awaited_once_with(
+            JOB, self.keys['orphan'][0],
+            older_than=self.now - timedelta(seconds=config.bot.orphan_source_grace_seconds),
+        )
 
     async def test_cache_sweep_is_skipped_without_local_bot_api(self):
-        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False, clock=lambda: self.now)
+        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False,
+                                 source_lifecycle=SourceLifecycle(), clock=lambda: self.now)
         self.assertEqual(await janitor.sweep_telegram_cache(), (0, 0))
 
     async def test_one_failing_step_does_not_stop_the_others(self):
         self.gateway.list_sources.side_effect = OSError('minio down')
-        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False, clock=lambda: self.now)
+        janitor = StorageJanitor(self.gateway, self.admissions, local_api=False,
+                                 source_lifecycle=SourceLifecycle(), clock=lambda: self.now)
         report = await janitor.run_once()
         self.assertNotIn('orphan_sources', report)
         self.assertEqual(report['telegram_cache'], (0, 0))

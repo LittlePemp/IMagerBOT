@@ -16,7 +16,7 @@ from pathlib import Path, PureWindowsPath
 from typing import get_args, get_origin, get_type_hints
 from uuid import UUID
 
-from .models import RuntimeConfig, WORKER_MEMORY_CEILING_BYTES
+from .models import RuntimeConfig, WORKER_MEMORY_CEILING_BYTES, MAX_DAILY_ADMISSION_RECEIPTS
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / 'config' / 'imager.toml'
@@ -141,6 +141,8 @@ def _validate(config):
                     raise ConfigurationError(f'{name} must be nonempty text without control characters')
 
     numbers(config)
+    if not config.bot.regular_user_upload_limit <= config.bot.max_daily_admissions <= MAX_DAILY_ADMISSION_RECEIPTS:
+        raise ConfigurationError('bot.max_daily_admissions must cover the daily quota and stay within the receipt budget')
     if config.retention.scan_size < max(
         config.retention.source_count, config.retention.result_count, config.retention.batch_size,
     ):
@@ -385,12 +387,14 @@ def _validate(config):
         raise ConfigurationError('Production and development UI ports must be distinct')
     templates = {
         'source_key_template': {'job_id', 'sha256'},
+        'source_attempt_key_template': {'job_id', 'upload_token', 'sha256'},
         'result_key_template': {'job_id', 'execution_token', 'result_filename'},
         'catalog_image_key_template': {'sha256', 'extension'},
         'catalog_manifest_key_template': {'group_id', 'sha256'},
     }
     samples = {
         'job_id': 'j' * JOB_ID_MAX_LENGTH, 'execution_token': 't' * JOB_ID_MAX_LENGTH,
+        'upload_token': 'a' * 32,
         'result_filename': config.storage.result_filename, 'sha256': 'a' * 64,
         'group_id': 'a' * GROUP_DIGEST_LENGTH, 'extension': '.jpeg',
     }

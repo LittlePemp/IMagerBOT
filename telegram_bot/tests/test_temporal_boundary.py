@@ -157,11 +157,26 @@ class Minio:
 
 
 class TestObjectStorage(unittest.TestCase):
+    def test_replays_use_different_keys_so_late_deletes_cannot_remove_a_new_source(self):
+        client = Minio()
+        storage = BotObjectStorage('', '', '', 'imager', client=client)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source.jpg'
+            source.write_bytes(b'identical-source')
+            old = storage.upload_source(source, 'job-1')
+            fresh = storage.upload_source(source, 'job-1')
+        self.assertEqual(old['sha256'], fresh['sha256'])
+        self.assertNotEqual(old['key'], fresh['key'])
+        # Model a DELETE that only reaches the store after a new process has
+        # uploaded and accepted the replay. Its key is permanently fenced.
+        client.objects.pop((old['bucket'], old['key']))
+        self.assertEqual(client.objects[(fresh['bucket'], fresh['key'])], b'identical-source')
+
     def test_nondefault_source_key_and_accepted_legacy_result_key(self):
         from src.infrastructure.services.object_storage import minio_storage
 
         configured = replace(config, storage=replace(
-            config.storage, source_key_template='new-sources/{sha256}/{job_id}.jpg',
+            config.storage, source_attempt_key_template='new-sources/{sha256}/{job_id}/{upload_token}.jpg',
         ))
         client = Minio()
         storage = BotObjectStorage('', '', '', 'imager', client=client)
@@ -170,8 +185,8 @@ class TestObjectStorage(unittest.TestCase):
             source.write_bytes(b'source-photo')
             with patch.object(minio_storage, 'config', configured):
                 uploaded = storage.upload_source(source, 'job-1')
-                self.assertEqual(uploaded['key'],
-                                 f"new-sources/{uploaded['sha256']}/job-1.jpg")
+                self.assertRegex(uploaded['key'],
+                                 f"^new-sources/{uploaded['sha256']}/job-1/[0-9a-f]{{32}}\\.jpg$")
                 # Immutable accepted references remain valid after key-layout
                 # configuration changes, including an older output prefix.
                 old_result = reference('previous-output/job-1/final.jpg', b'finished')

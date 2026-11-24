@@ -8,53 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from imager_config.loader import config
 from src.infrastructure.data.repositories.admission_repository import AdmissionRepository
-from test_daily_quota import AtomicCollection, submission
-
-
-_MISSING = object()
-
-
-def values_at(document, path):
-    parts = path.split('.') if isinstance(path, str) else path
-    if not parts:
-        return [document]
-    if isinstance(document, list):
-        return [value for row in document for value in values_at(row, parts)]
-    if not isinstance(document, dict) or parts[0] not in document:
-        return [_MISSING]
-    return values_at(document[parts[0]], parts[1:])
-
-
-def matches(document, query):
-    for field, condition in query.items():
-        if field == '$or':
-            if not any(matches(document, branch) for branch in condition):
-                return False
-            continue
-        values = values_at(document, field)
-        if isinstance(condition, dict) and any(key.startswith('$') for key in condition):
-            for operator, operand in condition.items():
-                if operator == '$elemMatch':
-                    if not any(isinstance(value, list) and any(matches(row, operand) for row in value)
-                               for value in values):
-                        return False
-                elif operator == '$ne':
-                    if any(value == operand for value in values):
-                        return False
-                elif operator == '$lt':
-                    if not any(value is not _MISSING and value < operand for value in values):
-                        return False
-                elif operator == '$lte':
-                    if not any(value is not _MISSING and value <= operand for value in values):
-                        return False
-                else:
-                    raise AssertionError(f'Unsupported model operator: {operator}')
-        elif condition is None:
-            if not any(value is None or value is _MISSING for value in values):
-                return False
-        elif not any(value == condition for value in values):
-            return False
-    return True
+from test_daily_quota import AtomicCollection, submission, _MISSING, values_at, matches
 
 
 def assign(document, path, value):
@@ -92,6 +46,8 @@ class NoticeCollection(AtomicCollection):
                     assign(target, path, (0 if previous is _MISSING else previous) + value)
                 elif operation == '$push':
                     previous.append(copy.deepcopy(value))
+                elif operation == '$unset':
+                    target.pop(path, None)
                 else:
                     raise AssertionError(f'Unsupported model update: {operation}')
 
@@ -296,7 +252,69 @@ class AdminNoticeRepositoryTests(unittest.IsolatedAsyncioTestCase):
             for args, kwargs in self.collection.indexes
         ))
         expiring = [(args, kwargs) for args, kwargs in self.collection.indexes if 'expireAfterSeconds' in kwargs]
-        # Only whole daily buckets expire, on their creation time, and far beyond
-        # Telegram's 24-hour update redelivery window and the current quota day.
-        self.assertEqual([args[0] for args, _ in expiring], ['created_at'])
-        self.assertGreaterEqual(expiring[0][1]['expireAfterSeconds'], 30 * 24 * 3600)
+        # A bucket gets an absolute deadline only after every outbox is done.
+        self.assertEqual([args[0] for args, _ in expiring], ['expires_at'])
+        self.assertEqual(expiring[0][1]['expireAfterSeconds'], 0)
+
+    async def test_expiry_waits_for_all_publications_and_notices_and_is_cleared_by_acceptance(self):
+        await self.accept('first', published=False)
+        await self.accept('second', published=False)
+        bucket = next(iter(self.collection.documents.values()))
+        self.assertNotIn('expires_at', bucket)
+        for job_id in ('first', 'second'):
+            claim = await self.repository.claim(now=self.now)
+            self.assertEqual(claim.job_id, job_id)
+            await self.repository.acknowledge(job_id, claim.token, now=self.now)
+            bucket = next(iter(self.collection.documents.values()))
+            self.assertNotIn('expires_at', bucket)  # fanout is still pending
+            await self.repository.initialize_admin_notice(job_id, [], now=self.now)
+            await self.repository.complete_admin_notice(job_id, now=self.now)
+            if job_id == 'first':
+                self.assertNotIn('expires_at', bucket)  # sibling not published
+        expected = self.now + timedelta(days=config.bot.admission_retention_days)
+        self.assertEqual(bucket['expires_at'], expected)
+        await self.accept('third', published=False)
+        bucket = next(iter(self.collection.documents.values()))
+        self.assertNotIn('expires_at', bucket)
+
+    async def test_definite_floodwait_reopen_atomically_removes_expiry(self):
+        await self.initialize(recipients=(99,))
+        await self.repository.claim_admin_notice_recipient('new', 99, now=self.now)
+        # Uncertain is terminal until a definite Telegram rejection is known.
+        await self.repository.complete_admin_notice('new', now=self.now)
+        bucket = next(iter(self.collection.documents.values()))
+        self.assertIn('expires_at', bucket)
+        await self.repository.update_admin_notice_recipient(
+            'new', 99, state='pending', retry_at=self.now + timedelta(seconds=30), now=self.now,
+        )
+        self.assertNotIn('expires_at', bucket)
+        self.assertEqual(self.entry('new')['admin_notice']['state'], 'pending')
+
+    async def test_startup_migrates_only_closed_legacy_buckets_and_preserves_old_pending_work(self):
+        await self.accept('pending', actor_id=1, published=False)
+        await self.accept('claimed', actor_id=2, published=False)
+        self.entry('claimed')['state'] = 'claimed'
+        await self.accept('notice-pending', actor_id=3)
+        await self.accept('closed', actor_id=4)
+        del self.entry('closed')['admin_notice']  # pre-notification legacy record
+        await self.accept('unknown-notice', actor_id=5)
+        self.entry('unknown-notice')['admin_notice']['state'] = 'unknown'
+        old = self.now - timedelta(days=config.bot.admission_retention_days + 60)
+        for bucket in self.collection.documents.values():
+            bucket['created_at'] = old
+            bucket['expires_at'] = old
+        del self.collection.documents['4:2026-11-13']['expires_at']
+        await self.collection.create_index('created_at', name='admission_bucket_ttl', expireAfterSeconds=86400)
+        await self.collection.create_index('other_deadline', name='unrelated_ttl', expireAfterSeconds=0)
+        await self.repository.initialize_indexes()
+        indexes = await self.collection.index_information()
+        self.assertNotIn('admission_bucket_ttl', indexes)
+        self.assertIn('unrelated_ttl', indexes)
+        self.assertEqual(indexes['admission_bucket_expiry_ttl']['key'], [('expires_at', 1)])
+        for actor in (1, 2, 3, 5):
+            bucket = self.collection.documents[f'{actor}:2026-11-13']
+            self.assertNotIn('expires_at', bucket)
+        self.assertGreater(self.collection.documents['4:2026-11-13']['expires_at'], datetime.now(timezone.utc))
+        # Pending work remains claimable despite being much older than the TTL.
+        claim = await self.repository.claim(now=self.now + timedelta(days=200))
+        self.assertIn(claim.job_id, ('pending', 'claimed'))

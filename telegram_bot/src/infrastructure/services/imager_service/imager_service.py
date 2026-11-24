@@ -13,6 +13,7 @@ from pymongo import MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from imager_contracts import JobRequest, ObjectRef, make_submission, payload_fingerprint
+from imager_contracts.storage_keys import is_owned_source_key
 from imager_contracts.protocol import GENERATION_SEED_HEX_LENGTH, JPEG_CONTENT_TYPE, JOB_ID_PATTERN, SCHEMA_VERSION
 from imager_config.loader import config as runtime_config
 from src.infrastructure.services.object_storage import BotObjectStorage
@@ -137,14 +138,7 @@ class ImagerService:
         )]
         if any(not prefix or key.startswith(prefix) for prefix in protected):
             raise ValueError('Source points into a catalog/import namespace')
-        expected = runtime_config.storage.source_key_template.format(
-            job_id=job_id, sha256=reference['sha256'],
-        )
-        legacy = {f'uploads/{job_id}/{filename}' for filename in (
-            runtime_config.storage.source_filename,
-            runtime_config.storage.upload_filename,
-        )}
-        if key != expected and key not in legacy:
+        if not is_owned_source_key(key, job_id, reference['sha256'], runtime_config.storage):
             raise ValueError('Source artifact is not owned by this job')
         max_bytes = runtime_config.limits.source_file_bytes
         if not 0 < reference['size_bytes'] <= max_bytes:
@@ -192,8 +186,39 @@ class ImagerService:
             service_logger.exception(f'Source upload failed: job_id={job_id}')
             raise
 
-    async def delete_source(self, job_id, key):
-        await asyncio.to_thread(self.object_store.delete_source, job_id, key)
+    async def delete_source(self, job_id, key, *, older_than=None):
+        # Cancelling to_thread does not stop its DELETE. Keep the producer's
+        # source guard until the actual IO has finished, including repeated
+        # cancellation during graceful shutdown.
+        operation = asyncio.create_task(asyncio.to_thread(
+            self.object_store.delete_source, job_id, key, older_than=older_than,
+        ))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            while not operation.done():
+                try:
+                    await asyncio.shield(operation)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                operation.result()
+            except Exception as error:
+                service_logger.error(f'Cancelled source cleanup IO failed: error_type={type(error).__name__}')
+            raise
+
+    @property
+    def source_bucket(self):
+        return self.object_store.bucket
+
+    async def source_is_referenced(self, key):
+        reference = await asyncio.to_thread(self.jobs.find_one, {'$or': [
+            {field + '.bucket': self.source_bucket, field + '.key': key}
+            for field in ('request.source', 'result')
+        ]}, {'_id': 1})
+        return reference is not None
 
     async def list_sources(self):
         return await asyncio.to_thread(lambda: list(self.object_store.list_sources()))

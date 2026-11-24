@@ -234,6 +234,9 @@ class RecentUploadsGatewayTests(unittest.IsolatedAsyncioTestCase):
         ))
         digest = reference()['sha256']
         keys = [f'new-uploads/{digest}/job-1.bin',
+                config.storage.source_attempt_key_template.format(
+                    job_id='job-1', upload_token='c' * 32, sha256=digest,
+                ),
                 'uploads/job-1/legacy-source.bin', 'uploads/job-1/legacy-upload.jpg']
         with patch('src.infrastructure.services.imager_service.imager_service.runtime_config', configured):
             for key in keys:

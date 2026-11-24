@@ -1,8 +1,8 @@
 """Periodic removal of files the bot owns but no longer references.
 
-* Local Bot API cache: telegram-bot-api (--local) keeps every downloaded photo
-  and ZIP forever. Transferred files are released immediately; this sweep
-  removes whatever a crash or an abandoned conversation left behind.
+* Local Bot API cache: transferred files are released after their last active
+  reader; this sweep removes whatever a crash or an abandoned conversation
+  left behind, respecting the same cache reader coordinator.
 * Unadmitted sources: a source is uploaded to MinIO before its admission is
   stored. If the process stops in between, no job document ever points at the
   object, so the core retention cannot see it.
@@ -31,9 +31,10 @@ def purge_bot_scratch(root=None):
 
 
 class StorageJanitor:
-    def __init__(self, gateway, admissions, *, local_api, clock=None):
+    def __init__(self, gateway, admissions, *, local_api, source_lifecycle, clock=None):
         self.gateway, self.admissions = gateway, admissions
         self.local_api = local_api
+        self.source_lifecycle = source_lifecycle
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def sweep_telegram_cache(self):
@@ -53,13 +54,16 @@ class StorageJanitor:
             job_id = BotObjectStorage.source_job_id(key)
             if job_id is None:
                 continue
-            # Referenced by a pending admission or by a core job: not an orphan.
-            if await self.admissions.find(job_id) is not None:
-                continue
-            if await self.gateway.get_job(job_id) is not None:
-                continue
-            await self.gateway.delete_source(job_id, key)
-            removed += 1
+            async with self.source_lifecycle.protect(job_id):
+                # Share the producer's guard, then recheck both references.
+                if await self.admissions.source_is_referenced(self.gateway.source_bucket, key):
+                    continue
+                if await self.gateway.source_is_referenced(key):
+                    continue
+                # The listing can predate a replay whose admission outcome is
+                # unknown. Recheck the CURRENT object age before deleting it.
+                if await self.gateway.delete_source(job_id, key, older_than=cutoff):
+                    removed += 1
         return removed
 
     async def run_once(self):
@@ -71,8 +75,15 @@ class StorageJanitor:
                 report[name] = await step()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                exception_logger.exception(f'Storage janitor step failed: {name}')
+            except Exception as error:
+                if name == 'telegram_cache':
+                    # Cache paths include the bot token. Keep the failure
+                    # visible without leaking its path through a traceback.
+                    exception_logger.error(
+                        f'Telegram cache sweep failed: error_type={type(error).__name__}'
+                    )
+                else:
+                    exception_logger.exception(f'Storage janitor step failed: {name}')
         service_logger.info(f'Storage janitor finished: {report}')
         return report
 

@@ -164,6 +164,56 @@ class ImageRetentionTests(unittest.TestCase):
             self.assertEqual((row['request'], row['result']), immutable[key])
             self.assertEqual(row['status'], 'completed')
 
+    def test_attempt_upload_keys_keep_ten_sources_and_delete_older_owned_objects(self):
+        for index, row in enumerate(self.collection.rows.values()):
+            source = row['request']['source']
+            self.store.objects.pop(source['key'])
+            source['key'] = config.storage.source_attempt_key_template.format(
+                job_id=row['_id'], upload_token=f'{index + 1:032x}', sha256=source['sha256'],
+            )
+            self.store.objects[source['key']] = copy.deepcopy(source)
+        self.cleaner.policy = replace(config.retention, result_count=20)
+        self.assertEqual(self.cleaner.cleanup_once(), {'source': 10, 'result': 0})
+        self.assertEqual(self.remaining('source'), {f'job{i:02d}' for i in range(10, 20)})
+        for index in range(10):
+            row = self.collection.rows[f'job{index:02d}']
+            self.assertEqual(value(row, 'artifact_lifecycle.source.state'), 'deleted')
+
+    def test_source_ownership_preserves_both_legacy_filenames(self):
+        row = copy.deepcopy(self.rows[0])
+        for name in (config.storage.source_filename, config.storage.upload_filename):
+            with self.subTest(filename=name):
+                row['request']['source']['key'] = f'uploads/{row["_id"]}/{name}'
+                self.assertEqual(self.cleaner._reference(row, 'source'), row['request']['source'])
+
+    def test_attempt_source_rejects_foreign_job_hash_token_and_path(self):
+        row = copy.deepcopy(self.rows[0])
+        source = row['request']['source']
+        token = 'a' * 32
+        def key(**changes):
+            fields = {'job_id': row['_id'], 'upload_token': token, 'sha256': source['sha256']}
+            return config.storage.source_attempt_key_template.format(**dict(fields, **changes))
+
+        accepted = key()
+        source['key'] = accepted
+        self.assertEqual(self.cleaner._reference(row, 'source'), source)
+        for invalid in (
+            key(job_id='another-job'), key(sha256='b' * 64),
+            key(upload_token='a' * 31), key(upload_token='a' * 33),
+            key(upload_token='A' * 32), key(upload_token='g' * 32),
+            key(upload_token='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
+            key(upload_token=token + '/extra'), key(upload_token='../' + token),
+            key(upload_token=token + '%2Fextra'), accepted + '.extra',
+        ):
+            with self.subTest(key=invalid):
+                source['key'] = invalid
+                with self.assertRaises(ValueError):
+                    self.cleaner._reference(row, 'source')
+        source['key'] = accepted
+        source['bucket'] = 'another-bucket'
+        with self.assertRaisesRegex(ValueError, 'different bucket'):
+            self.cleaner._reference(row, 'source')
+
     def test_active_inputs_and_pending_telegram_delivery_are_protected(self):
         self.collection.rows['job00']['status'] = 'running'
         self.collection.rows['job01']['completion_outbox']['state'] = 'preparing'

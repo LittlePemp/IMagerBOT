@@ -75,6 +75,7 @@ cell_filename = "original.bin"
 manifest_filename = "manifest.json"
 result_filename = "result.jpg"
 source_key_template = "uploads/{job_id}/{sha256}.jpg"
+source_attempt_key_template = "uploads/{job_id}/attempts/{upload_token}/{sha256}.jpg"
 result_key_template = "jobs/{job_id}/attempts/{execution_token}/{result_filename}"
 catalog_image_key_template = "catalog/images/{sha256}{extension}"
 catalog_manifest_key_template = "catalog/manifests/{group_id}/{sha256}.json"
@@ -198,6 +199,8 @@ cell_size_max = 200
 result_size_min = 1
 result_size_max = 300
 regular_user_upload_limit = 5
+# Includes refunded failures; bounds the daily durable receipt array.
+max_daily_admissions = 64
 # Calendar days use bot.timezone; quota applies to every Telegram account.
 admission_poll_seconds = 1.0
 admission_lease_seconds = 60

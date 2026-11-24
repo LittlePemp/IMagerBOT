@@ -4,15 +4,16 @@ import hashlib
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from pymongo.errors import DuplicateKeyError, NetworkTimeout
 from pymongo import ReturnDocument
 
 from imager_contracts import make_submission
+from imager_config.loader import config
 from src.application.admission import AdmissionDispatcher
 from src.infrastructure.data.errors import AdmissionConflict, DailyQuotaExceeded
-from src.infrastructure.data.repositories.admission_repository import AdmissionRepository
+from src.infrastructure.data.repositories.admission_repository import AdmissionRepository, DailyAdmissionLimitExceeded
 
 
 def submission(job_id, user_id=1, noise=15):
@@ -28,33 +29,55 @@ def submission(job_id, user_id=1, noise=15):
     })
 
 
+_MISSING = object()
+
+
+def values_at(document, path):
+    parts = path.split('.') if isinstance(path, str) else path
+    if not parts:
+        return [document]
+    if isinstance(document, list):
+        if parts[0].isdigit():
+            index = int(parts[0])
+            return values_at(document[index], parts[1:]) if index < len(document) else [_MISSING]
+        return [value for row in document for value in values_at(row, parts)]
+    if not isinstance(document, dict) or parts[0] not in document:
+        return [_MISSING]
+    return values_at(document[parts[0]], parts[1:])
+
+
 def matches(document, query):
-    for key, condition in query.items():
-        if key == '$or':
-            if not any(matches(document, item) for item in condition):
+    for field, condition in query.items():
+        if field in ('$or', '$nor'):
+            found = any(matches(document, branch) for branch in condition)
+            if found != (field == '$or'):
                 return False
             continue
-        if key == 'admissions.job_id':
-            values = [entry['job_id'] for entry in document.get('admissions', [])]
-            if isinstance(condition, dict) and '$ne' in condition:
-                if condition['$ne'] in values:
+        values = values_at(document, field)
+        if isinstance(condition, dict) and any(key.startswith('$') for key in condition):
+            existing = [value for value in values if value is not _MISSING]
+            for operator, operand in condition.items():
+                if operator == '$elemMatch':
+                    valid = any(isinstance(value, list) and any(matches(row, operand) for row in value)
+                                for value in values)
+                elif operator == '$ne':
+                    valid = not any(value == operand for value in values)
+                elif operator == '$lt':
+                    valid = any(value < operand for value in existing)
+                elif operator == '$lte':
+                    valid = any(value <= operand for value in existing)
+                elif operator == '$gt':
+                    valid = any(value > operand for value in existing)
+                elif operator == '$exists':
+                    valid = bool(existing) == operand
+                else:
+                    raise AssertionError(f'Unsupported model operator: {operator}')
+                if not valid:
                     return False
-            elif condition not in values:
+        elif condition is None:
+            if not any(value is None or value is _MISSING for value in values):
                 return False
-            continue
-        if key == 'admissions.0':
-            if bool(document.get('admissions')) != condition['$exists']:
-                return False
-            continue
-        value = document.get(key)
-        if isinstance(condition, dict):
-            if '$elemMatch' in condition and not any(matches(item, condition['$elemMatch']) for item in value):
-                return False
-            if '$lt' in condition and not value < condition['$lt']:
-                return False
-            if '$lte' in condition and not value <= condition['$lte']:
-                return False
-        elif value != condition:
+        elif not any(value == condition for value in values):
             return False
     return True
 
@@ -73,6 +96,29 @@ class AtomicCollection:
 
     async def create_index(self, *args, **kwargs):
         self.indexes.append((args, kwargs))
+
+    async def index_information(self):
+        result = {}
+        for args, options in self.indexes:
+            key = [(args[0], 1)] if isinstance(args[0], str) else list(args[0])
+            name = options.get('name') or '_'.join(f'{field}_{direction}' for field, direction in key)
+            result[name] = dict(options, key=key)
+        return result
+
+    async def drop_index(self, name):
+        info = await self.index_information()
+        self.indexes = [(args, options) for args, options in self.indexes
+                        if options.get('name') != name]
+        assert name in info
+
+    async def update_many(self, query, update):
+        count = 0
+        async with self.lock:
+            for document in self.documents.values():
+                if matches(document, query):
+                    self._apply(document, query, update)
+                    count += 1
+        return SimpleNamespace(matched_count=count, modified_count=count)
 
     async def find_one(self, query, projection=None, sort=None):
         async with self.lock:
@@ -105,6 +151,8 @@ class AtomicCollection:
                            for bucket in self.documents.values() for item in bucket['admissions']):
                         raise DuplicateKeyError('job identity')
                     target[field].append(copy.deepcopy(value))
+                elif operation == '$unset':
+                    target.pop(field, None)
 
     async def update_one(self, query, update, upsert=False):
         async with self.lock:
@@ -172,6 +220,83 @@ class TestDailyQuota(unittest.IsolatedAsyncioTestCase):
             self.collection, timezone='Europe/Moscow', daily_limit=5, lease_seconds=60, retry_seconds=3,
         )
         self.now = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
+
+    async def test_refunded_failures_keep_receipts_bounded_and_replayable(self):
+        limit = config.bot.max_daily_admissions
+        for index in range(limit):
+            job_id = f'failed-{index}'
+            await self.repository.accept_submission(submission(job_id), actor_id=1, now=self.now)
+            self.assertTrue(await self.repository.refund(job_id, now=self.now))
+            self.assertFalse(await self.repository.refund(job_id, now=self.now))
+        bucket = self.collection.documents['1:2026-11-12']
+        self.assertEqual((bucket['used'], len(bucket['admissions'])), (0, limit))
+        self.assertEqual(await self.repository.remaining(1, self.now), 5)
+        with self.assertRaises(DailyAdmissionLimitExceeded):
+            await self.repository.ensure_admission_capacity(1, now=self.now)
+        with self.assertRaises(DailyAdmissionLimitExceeded):
+            await self.repository.accept_submission(submission('excess'), actor_id=1, now=self.now)
+        replay = await self.repository.accept_submission(submission('failed-0'), actor_id=1, now=self.now)
+        self.assertTrue(replay.duplicate)
+        self.assertEqual(len(bucket['admissions']), limit)
+        # A new calendar day has its own attempt and successful-image budgets.
+        tomorrow = self.now + timedelta(days=1)
+        await self.repository.ensure_admission_capacity(1, now=tomorrow)
+        await self.repository.accept_submission(submission('tomorrow'), actor_id=1, now=tomorrow)
+        self.assertEqual(await self.repository.remaining(1, tomorrow), 4)
+
+    async def test_source_pin_matches_bucket_and_key_in_the_same_admission(self):
+        first, second = submission('first'), submission('second')
+        await self.repository.accept_submission(first, actor_id=1, now=self.now)
+        await self.repository.accept_submission(second, actor_id=1, now=self.now)
+        self.assertTrue(await self.repository.source_is_referenced('imager', 'uploads/first/source.jpg'))
+        self.assertFalse(await self.repository.source_is_referenced('imager', 'uploads/missing/source.jpg'))
+        # Even malformed legacy data must not combine a bucket from one entry
+        # with the key from another when checking whether an object is pinned.
+        bucket = self.collection.documents['1:2026-11-12']
+        bucket['admissions'][0]['document']['request']['source']['bucket'] = 'other-bucket'
+        self.assertFalse(await self.repository.source_is_referenced('imager', 'uploads/first/source.jpg'))
+
+    async def test_last_attempt_slot_is_atomic_even_when_the_success_quota_is_free(self):
+        for index in range(config.bot.max_daily_admissions - 1):
+            job_id = f'failed-{index}'
+            await self.repository.accept_submission(submission(job_id), actor_id=1, now=self.now)
+            await self.repository.refund(job_id, now=self.now)
+        results = await asyncio.gather(*[
+            self.repository.accept_submission(submission(f'last-{index}'), actor_id=1, now=self.now)
+            for index in range(2)
+        ], return_exceptions=True)
+        self.assertEqual(sum(isinstance(result, DailyAdmissionLimitExceeded) for result in results), 1)
+        self.assertEqual(await self.repository.remaining(1, self.now), 4)
+        bucket = self.collection.documents['1:2026-11-12']
+        self.assertEqual(len(bucket['admissions']), config.bot.max_daily_admissions)
+
+    async def test_legacy_oversized_bucket_is_preserved_but_does_not_grow(self):
+        await self.repository.accept_submission(submission('legacy'), actor_id=1, now=self.now)
+        bucket = self.collection.documents['1:2026-11-12']
+        template = copy.deepcopy(bucket['admissions'][0])
+        for index in range(config.bot.max_daily_admissions):
+            entry = copy.deepcopy(template)
+            document = submission(f'legacy-{index}')
+            entry.update(job_id=document['_id'], document=document, payload_hash=document['payload_hash'])
+            bucket['admissions'].append(entry)
+        bucket['used'] = 0
+        original = copy.deepcopy(bucket)
+        with self.assertRaises(DailyAdmissionLimitExceeded):
+            await self.repository.accept_submission(submission('new'), actor_id=1, now=self.now)
+        self.assertTrue((await self.repository.accept_submission(submission('legacy'), actor_id=1, now=self.now)).duplicate)
+        self.assertEqual(bucket, original)
+
+    async def test_administrator_attempts_remain_unlimited_and_refund_survives_demotion(self):
+        for index in range(config.bot.max_daily_admissions + 1):
+            job_id = f'admin-{index}'
+            await self.repository.accept_submission(submission(job_id), actor_id=1,
+                                                    now=self.now, quota_exempt=True)
+            self.assertTrue(await self.repository.refund(job_id, now=self.now))
+        await self.repository.ensure_admission_capacity(1, now=self.now)
+        self.assertEqual(await self.repository.remaining(1, self.now), 5)
+        self.assertTrue(all(len(bucket['admissions']) <= 1 for bucket in self.collection.documents.values()))
+        await self.repository.accept_submission(submission('demoted'), actor_id=1, now=self.now)
+        self.assertEqual(await self.repository.remaining(1, self.now), 4)
 
     async def test_unlimited_administrators_use_one_bounded_bucket_per_image(self):
         receipts = await asyncio.gather(*[

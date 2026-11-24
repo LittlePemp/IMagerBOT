@@ -186,6 +186,7 @@ async def main():
         projection = CatalogImportProjection(imports, repositories.image_group_repository)
         janitor = StorageJanitor(
             imager_service, repositories.admission_repository, local_api=settings.telegram_api_local,
+            source_lifecycle=dispatcher['generation_service'].source_lifecycle,
         )
         tasks = [asyncio.create_task(notifier.run(stop)), asyncio.create_task(admission.run(stop)),
                  asyncio.create_task(projection.run(stop)), asyncio.create_task(progress.run(stop)),

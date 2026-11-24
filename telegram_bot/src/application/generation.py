@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from imager_config.loader import config
 from imager_contracts import GenerationParameters, validate_watermark_text
+from src.application.source_lifecycle import SourceLifecycle
 from src.infrastructure.data.errors import AccessDenied, AdmissionUncertain, DailyQuotaExceeded
 from src.infrastructure.services.imager_service.schemas import GenerateImageRequest
 from src.models.generation_history import generation_history_record_id
@@ -28,11 +29,13 @@ def validate_output(result_size, cell_size):
 
 
 class SubmitGeneration:
-    def __init__(self, repositories, gateway, gate, *, fixed_admin_ids=(), watermark_text=None):
+    def __init__(self, repositories, gateway, gate, *, fixed_admin_ids=(), watermark_text=None,
+                 source_lifecycle=None):
         self.repositories, self.gateway, self.gate = repositories, gateway, gate
         self.admissions = repositories.admission_repository
         self.fixed_admin_ids = frozenset(fixed_admin_ids)
         self.watermark_text = validate_watermark_text(watermark_text)
+        self.source_lifecycle = source_lifecycle if source_lifecycle is not None else SourceLifecycle()
 
     async def previous_settings(self, actor_id):
         """Reuse values, never an earlier image, seed, command or mutable preset."""
@@ -91,6 +94,15 @@ class SubmitGeneration:
             raise ValueError('Очередь заполнена. Попробуйте отправить изображение позже.')
 
     async def execute(self, *, actor_id, draft, job_id, client_context, source_loader):
+        # Replays share a job identity, while each PUT has its own source key.
+        # Coordinate their publication and cleanup until admission is durable.
+        async with self.source_lifecycle.protect(job_id):
+            return await self._execute(
+                actor_id=actor_id, draft=draft, job_id=job_id,
+                client_context=client_context, source_loader=source_loader,
+            )
+
+    async def _execute(self, *, actor_id, draft, job_id, client_context, source_loader):
         receipt = await self.admissions.find(job_id)
         if receipt is not None:
             if receipt.actor_id != actor_id:
@@ -114,8 +126,10 @@ class SubmitGeneration:
         quota_exempt = await self._policy(actor_id, draft)
         now = datetime.now(timezone.utc)
         await self._seed_day(actor_id, now)
-        if not quota_exempt and not await self.admissions.remaining(actor_id, now=now):
-            raise DailyQuotaExceeded(config.bot.regular_user_upload_limit, self.admissions.day_window(now)[1])
+        if not quota_exempt:
+            await self.admissions.ensure_admission_capacity(actor_id, now=now)
+            if not await self.admissions.remaining(actor_id, now=now):
+                raise DailyQuotaExceeded(config.bot.regular_user_upload_limit, self.admissions.day_window(now)[1])
         await self._capacity()
         async with self.gate.acquire(actor_id):
             source = await source_loader(job_id)
@@ -159,9 +173,9 @@ class SubmitGeneration:
     async def _discard_source(self, job_id, source):
         """Remove a source uploaded for a request that was definitely not admitted.
 
-        The key is shared by every replay of the same Telegram message, so it is
-        deleted only while neither an admission nor a core job references it.
-        Failures are left to the storage janitor.
+        Each upload attempt has its own immutable key. Keep it if admission
+        ownership is already known or uncertain; the janitor can later check
+        exact references and release an unused attempt after its grace period.
         """
         try:
             key = source.get('key') if isinstance(source, dict) else None

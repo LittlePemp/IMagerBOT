@@ -1,8 +1,9 @@
 """Constrain Local Bot API reads to its shared cache and release transferred files."""
+from contextlib import contextmanager
 from pathlib import Path
 
 from imager_config.loader import config
-from imager_contracts.scratch import release_telegram_file
+from imager_contracts.scratch import TelegramCacheTransfer, release_telegram_file
 from src.utils.loggers import exception_logger
 
 
@@ -20,6 +21,21 @@ def validate_download_path(bot, remote):
             raise ValueError('Telegram вернул недопустимый путь к файлу.')
 
 
+@contextmanager
+def local_file_transfer(bot):
+    """Cover getFile, file opening, transfer and release with one cache pin."""
+    if not _is_local(bot):
+        yield None
+        return
+    transfer = TelegramCacheTransfer(config.pack_import.bot_api_container_directory)
+    try:
+        with transfer:
+            yield transfer
+    finally:
+        for error_type in transfer.cleanup_errors:
+            exception_logger.error(f'Cannot release deferred Local Bot API file: {error_type}')
+
+
 def release_local_file(bot, file_path):
     """Best-effort removal of a file already copied out of the Local Bot API cache.
 
@@ -30,6 +46,7 @@ def release_local_file(bot, file_path):
         return False
     try:
         return release_telegram_file(config.pack_import.bot_api_container_directory, file_path)
-    except (OSError, ValueError):
-        exception_logger.exception('Cannot release Local Bot API file; the janitor will remove it')
+    except (OSError, ValueError) as error:
+        # Exception text/traceback can expose the bot token in the cache path.
+        exception_logger.error(f'Cannot release Local Bot API file: {type(error).__name__}')
         return False
